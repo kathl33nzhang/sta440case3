@@ -43,11 +43,11 @@ ems <- x |>
   ) |>
   mutate(
     disp_to_enroute_min = as.numeric(timeToEnroute, units = "mins"),
-    response_time_min   = as.numeric(observedTT,    units = "mins"),
-    on_scene_min        = as.numeric(onSceneDur,    units = "mins"),
-    to_hospital_min     = as.numeric(toHospitalTT,  units = "mins"),
-    at_hospital_min     = as.numeric(atHospitalDur, units = "mins"),
-    total_call_min      = as.numeric(dispToClearTime, units = "mins")
+    response_time_min = as.numeric(observedTT,    units = "mins"),
+    on_scene_min = as.numeric(onSceneDur,    units = "mins"),
+    to_hospital_min = as.numeric(toHospitalTT,  units = "mins"),
+    at_hospital_min = as.numeric(atHospitalDur, units = "mins"),
+    total_call_min = as.numeric(dispToClearTime, units = "mins")
   )
 ```
 
@@ -66,6 +66,8 @@ summaries <- list(
 )
 summaries
 ```
+
+# Call concentration & ambulance utilization
 
 ```{r, fig.width=12, fig.height=6}
 
@@ -185,6 +187,8 @@ ggplot(util_by_unit, aes(reorder(VEH.GRID, utilization), utilization)) +
 
 ```
 
+# Compare Near vs. Far North sites
+
 ```{r}
 #| label: station-distances
 
@@ -210,7 +214,6 @@ mismatch_tbl <- ems |>
   ungroup()
 
 mismatch_tbl
-
 ```
 
 ```{r}
@@ -259,6 +262,25 @@ unavail_by_region
 ```
 
 ```{r}
+# vizs
+
+ggplot(ems, aes(REF.GRID, fill = closest_current)) +
+  geom_bar(position = "fill") +
+  labs(x = "", y = "Share", fill = "Closest (UA)", title = "Closest current base by region")
+
+ems |>
+  filter(REF.GRID == "North") |>
+  tidyr::pivot_longer(c(eTT.UA.NN, eTT.UA.FN), names_to = "north_site", values_to = "ua_secs") |>
+  mutate(north_site = recode(north_site, "eTT.UA.NN" = "Near North", "eTT.UA.FN" = "Far North"),
+         ua_min = ua_secs/60) |>
+  ggplot(aes(north_site, ua_min, fill = north_site)) +
+  geom_boxplot(outlier.alpha = 0.1) +
+  labs(x = "", y = "UA minutes", title = "North calls: UA time to Near vs Far")
+```
+
+# Other
+
+```{r}
 #| label: hospital-vs-no-hospital
 
 # hospital vs no-hospital share and time distributions
@@ -278,22 +300,5 @@ ggplot(ems, aes(REF.GRID, response_time_min, fill = REF.GRID)) +
   geom_boxplot(outlier.alpha = 0.1) +
   labs(x = "", y = "Response time (min)", title = "Observed response times by region") +
   theme(legend.position = "none")
-```
-
-```{r}
-# quick visuals tied to objectives
-
-ggplot(ems, aes(REF.GRID, fill = closest_current)) +
-  geom_bar(position = "fill") +
-  labs(x = "", y = "Share", fill = "Closest (UA)", title = "Closest current base by region")
-
-ems |>
-  filter(REF.GRID == "North") |>
-  tidyr::pivot_longer(c(eTT.UA.NN, eTT.UA.FN), names_to = "north_site", values_to = "ua_secs") |>
-  mutate(north_site = recode(north_site, "eTT.UA.NN" = "Near North", "eTT.UA.FN" = "Far North"),
-         ua_min = ua_secs/60) |>
-  ggplot(aes(north_site, ua_min, fill = north_site)) +
-  geom_boxplot(outlier.alpha = 0.1) +
-  labs(x = "", y = "UA minutes", title = "North calls: UA time to Near vs Far")
 ```
 
