@@ -3,3 +3,138 @@ title: "Analysis"
 output: html_document
 ---
 
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+
+ems <- load("emsData.RData")
+head(x)
+ems <- x
+```
+
+```{r, fig.width=12, fig.height=6}
+
+ems_plot <- data.frame(
+  lon = as.numeric(x$REF.GPS.LON),
+  lat = as.numeric(x$REF.GPS.LAT)
+) |> na.omit() |>
+  subset(lon > -78.55 & lon < -78.25 & lat > 36.15 & lat < 36.55)
+
+stations <- data.frame(
+  name = c("South","Central"),
+  lat  = c(36.2765, 36.3450),
+  lon  = c(-78.4004, -78.3905)
+)
+
+library(ggplot2)
+library(ggrepel)
+
+stations <- data.frame(
+  name = c("South","Central"),
+  lat  = c(36.2765, 36.3450),
+  lon  = c(-78.4004, -78.3905)
+)
+
+ggplot(ems_plot, aes(lon, lat)) +
+  # hex bins look nicer than squares
+  geom_hex(bins = 35, alpha = 0.95) +
+  coord_fixed() +
+  scale_fill_viridis_c(trans = "sqrt", name = "Calls") +
+  # stations: clearer markers + labels
+  geom_point(data = stations, aes(lon, lat),
+             inherit.aes = FALSE, shape = 21, size = 3.8,
+             stroke = 1, colour = "black", fill = "white") +
+  geom_label_repel(data = stations, aes(lon, lat, label = name),
+                   inherit.aes = FALSE, size = 3,
+                   label.padding = unit(0.12, "lines"),
+                   label.size = 0, seed = 1) +
+  labs(title = "EMS call density",
+       subtitle = "Outlier removed",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(face = "bold", size = 16),
+    legend.key.height = unit(0.6, "cm")
+  )
+
+
+
+```
+
+```{r}
+
+ems <- ems %>%
+  mutate(
+    DT.DISP      = as_datetime(DT.DISP),
+    DT.AVAILABLE = as_datetime(DT.AVAILABLE)
+  ) %>%
+  filter(!is.na(VEH.GRID), !is.na(DT.DISP), !is.na(DT.AVAILABLE),
+         DT.AVAILABLE >= DT.DISP)
+
+# Observation window (used for utilization denominators)
+t_start <- min(ems$DT.DISP, na.rm = TRUE)
+t_end   <- max(ems$DT.AVAILABLE, na.rm = TRUE)
+obs_seconds <- as.numeric(t_end - t_start, units = "secs")
+
+# ---- 1) Build a global event timeline (+1 at dispatch, -1 at available) ----
+events <- ems %>%
+  transmute(VEH.GRID, start = DT.DISP, end = DT.AVAILABLE) %>%
+  pivot_longer(c(start, end), names_to = "etype", values_to = "time") %>%
+  mutate(delta = if_else(etype == "start", 1L, -1L))
+
+# Important tie-break: if a unit becomes available at the same instant another dispatch occurs,
+# process the -1 (end) BEFORE the +1 (start) so we don't briefly overcount.
+events <- events %>% arrange(time, desc(delta))  # -1 before +1 at identical timestamps
+
+timeline <- events %>%
+  transmute(time, delta) %>%
+  arrange(time) %>%
+  mutate(active = cumsum(delta)) %>%
+  mutate(time_next = lead(time),
+         seg_sec   = as.numeric(time_next - time, units = "secs")) %>%
+  filter(!is.na(time_next), seg_sec > 0)
+
+simul_summary <- timeline %>%
+  group_by(active) %>%
+  summarise(total_sec = sum(seg_sec), .groups = "drop") %>%
+  mutate(pct_of_time = total_sec / sum(total_sec))
+
+simul_summary
+# > table with rows: active=0,1,2,3,4 (how often the system had that many units busy)
+# pct_of_time is the fraction of the entire observed time.
+
+ggplot(simul_summary, aes(factor(active), pct_of_time)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Simultaneous busy ambulances", y = "% of observed time",
+       title = "System load: how many ambulances are busy simultaneously")
+
+# ---- 3) Percent of time fully saturated (all 4 busy) & other thresholds ----
+pct_all_busy   <- simul_summary %>% filter(active >= 4) %>% summarise(p = sum(pct_of_time)) %>% pull(p)
+pct_three_plus <- simul_summary %>% filter(active >= 3) %>% summarise(p = sum(pct_of_time)) %>% pull(p)
+
+pct_all_busy
+pct_three_plus
+# Interpret: if pct_all_busy is tiny, saturation is rare; if sizeable, queuing/simulation matters.
+
+# ---- 4) Per-unit utilization (busy time / observation time) ----
+util_by_unit <- ems %>%
+  mutate(call_sec = as.numeric(DT.AVAILABLE - DT.DISP, units = "secs")) %>%
+  group_by(VEH.GRID) %>%
+  summarise(busy_sec = sum(call_sec, na.rm = TRUE), .groups = "drop") %>%
+  mutate(utilization = busy_sec / obs_seconds) %>%
+  arrange(desc(utilization))
+
+util_by_unit
+
+ggplot(util_by_unit, aes(reorder(VEH.GRID, utilization), utilization)) +
+  geom_col() +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Ambulance (VEH.GRID)", y = "Utilization",
+       title = "Per-unit utilization over the observation window")
+
+```
