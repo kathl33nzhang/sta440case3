@@ -4,14 +4,67 @@ output: html_document
 ---
 
 ```{r}
-library(dplyr)
-library(tidyr)
-library(lubridate)
-library(ggplot2)
+#| label: load-packages
 
-ems <- load("emsData.RData")
-head(x)
-ems <- x
+library(tidyverse)
+library(lubridate)
+library(ggrepel)
+```
+
+```{r}
+#| label: data-processing
+
+load("emsData.RData")
+
+ems <- x |>
+  select(-c( # remove unneeded columns
+    eTT.Pe.So, eTT.Pe.Ce, eTT.Pe.NN, eTT.Pe.FN,
+    eTT.BG.So, eTT.BG.Ce, eTT.BG.NN, eTT.BG.FN,
+    eTT.Op.So, eTT.Op.Ce, eTT.Op.NN, eTT.Op.FN
+  )) |>
+  mutate(
+    BASE.NAME = recode(BASE.NAME,
+                       "Company 9" = "Central",
+                       "Company 1" = "South"),
+    BASE.NAME = factor(BASE.NAME, levels = c("Central","South")),
+    REF.GRID = case_when(
+      str_detect(REF.GRID, "North")   ~ "North",
+      str_detect(REF.GRID, "Central") ~ "Central",
+      str_detect(REF.GRID, "South")   ~ "South",
+      TRUE ~ REF.GRID
+    ),
+    REF.GRID = factor(REF.GRID, levels = c("South","Central","North")),
+    DISPATCH.PRIORITY.NAME = recode(DISPATCH.PRIORITY.NAME,
+                                    "Non Emergency" = "Non-emergency",
+                                    "Emergency" = "Emergency"),
+    DISPATCH.PRIORITY.NAME = factor(DISPATCH.PRIORITY.NAME,
+                                    levels = c("Emergency","Non-emergency")),
+    went_hospital = REC.NAME != ""
+  ) |>
+  mutate(
+    disp_to_enroute_min = as.numeric(timeToEnroute, units = "mins"),
+    response_time_min   = as.numeric(observedTT,    units = "mins"),
+    on_scene_min        = as.numeric(onSceneDur,    units = "mins"),
+    to_hospital_min     = as.numeric(toHospitalTT,  units = "mins"),
+    at_hospital_min     = as.numeric(atHospitalDur, units = "mins"),
+    total_call_min      = as.numeric(dispToClearTime, units = "mins")
+  )
+```
+
+```{r}
+#| label: summary-stats
+
+summaries <- list(
+  response_by_region = ems |>
+    group_by(REF.GRID) |>
+    summarise(n = n(),
+              median_resp = median(response_time_min, na.rm = TRUE),
+              p90_resp    = quantile(response_time_min, 0.9, na.rm = TRUE)),
+  north_near_far_share = north_choice,
+  nearest_base_unavail = unavail_by_region,
+  went_hospital_share  = hosp_share
+)
+summaries
 ```
 
 ```{r, fig.width=12, fig.height=6}
@@ -27,9 +80,6 @@ stations <- data.frame(
   lat  = c(36.2765, 36.3450),
   lon  = c(-78.4004, -78.3905)
 )
-
-library(ggplot2)
-library(ggrepel)
 
 stations <- data.frame(
   name = c("South","Central"),
@@ -59,13 +109,9 @@ ggplot(ems_plot, aes(lon, lat)) +
     plot.title = element_text(face = "bold", size = 16),
     legend.key.height = unit(0.6, "cm")
   )
-
-
-
 ```
 
 ```{r}
-
 ems <- ems %>%
   mutate(
     DT.DISP      = as_datetime(DT.DISP),
@@ -138,3 +184,116 @@ ggplot(util_by_unit, aes(reorder(VEH.GRID, utilization), utilization)) +
        title = "Per-unit utilization over the observation window")
 
 ```
+
+```{r}
+#| label: station-distances
+
+# closest stations using UA (unadjusted) travel times
+ems <- ems |>
+  mutate(
+    closest_current = if_else(eTT.UA.Ce <= eTT.UA.So, "Central", "South"),
+    closest_current = factor(closest_current, levels = c("South","Central")),
+    closer_north = case_when(
+      !is.na(eTT.UA.NN) & !is.na(eTT.UA.FN) & eTT.UA.NN <= eTT.UA.FN ~ "Near North",
+      !is.na(eTT.UA.NN) & !is.na(eTT.UA.FN) & eTT.UA.NN >  eTT.UA.FN ~ "Far North",
+      TRUE ~ NA_character_
+    ),
+    closer_north = factor(closer_north, levels = c("Near North","Far North"))
+  )
+
+# nearest-base mismatch (current system)
+mismatch_tbl <- ems |>
+  mutate(match_base = BASE.NAME == closest_current) |>
+  count(REF.GRID, match_base) |>
+  group_by(REF.GRID) |>
+  mutate(pct = n / sum(n)) |>
+  ungroup()
+
+mismatch_tbl
+
+```
+
+```{r}
+#| label: near-vs-far-north
+
+# how often Near vs Far is closer for North calls
+north_choice <- ems |>
+  filter(REF.GRID == "North") |>
+  count(closer_north) |>
+  mutate(pct = n / sum(n))
+
+north_choice
+```
+
+```{r}
+# nearest-base unavailable at dispatch (capacity Central=3, South=1)
+cap_tbl <- tibble(base = c("Central","South"), cap = c(3L, 1L))
+
+avail_check <- ems |>
+  transmute(call_id = row_number(),
+            t = DT.DISP,
+            grid = REF.GRID,
+            base = BASE.NAME,
+            closest = closest_current)
+
+busy_counts <- lapply(c("Central","South"), function(b) {
+  idx <- which(ems$BASE.NAME == b & !is.na(ems$DT.DISP) & !is.na(ems$DT.AVAILABLE))
+  starts <- ems$DT.DISP[idx]; ends <- ems$DT.AVAILABLE[idx]
+  vapply(avail_check$t, function(tt) sum(starts <= tt & ends > tt), integer(1))
+})
+busy_df <- as.data.frame(busy_counts); names(busy_df) <- c("Central_busy","South_busy")
+avail_check <- bind_cols(avail_check, busy_df)
+
+avail_check <- avail_check |>
+  left_join(cap_tbl, by = c("closest" = "base")) |>
+  mutate(closest_busy = if_else(closest == "Central", Central_busy, South_busy),
+         closest_available = closest_busy < cap)
+
+unavail_by_region <- avail_check |>
+  count(grid, closest_available) |>
+  group_by(grid) |>
+  mutate(pct = n / sum(n)) |>
+  ungroup()
+
+unavail_by_region
+```
+
+```{r}
+#| label: hospital-vs-no-hospital
+
+# hospital vs no-hospital share and time distributions
+hosp_share <- ems |>
+  count(REF.GRID, went_hospital) |>
+  group_by(REF.GRID) |>
+  mutate(pct = n / sum(n)) |>
+  ungroup()
+
+hosp_share
+
+ggplot(ems, aes(went_hospital, total_call_min)) +
+  geom_boxplot() +
+  labs(x = "Went to hospital?", y = "Total call minutes", title = "Total time by hospital vs no-hospital")
+
+ggplot(ems, aes(REF.GRID, response_time_min, fill = REF.GRID)) +
+  geom_boxplot(outlier.alpha = 0.1) +
+  labs(x = "", y = "Response time (min)", title = "Observed response times by region") +
+  theme(legend.position = "none")
+```
+
+```{r}
+# quick visuals tied to objectives
+
+ggplot(ems, aes(REF.GRID, fill = closest_current)) +
+  geom_bar(position = "fill") +
+  labs(x = "", y = "Share", fill = "Closest (UA)", title = "Closest current base by region")
+
+ems |>
+  filter(REF.GRID == "North") |>
+  tidyr::pivot_longer(c(eTT.UA.NN, eTT.UA.FN), names_to = "north_site", values_to = "ua_secs") |>
+  mutate(north_site = recode(north_site, "eTT.UA.NN" = "Near North", "eTT.UA.FN" = "Far North"),
+         ua_min = ua_secs/60) |>
+  ggplot(aes(north_site, ua_min, fill = north_site)) +
+  geom_boxplot(outlier.alpha = 0.1) +
+  labs(x = "", y = "UA minutes", title = "North calls: UA time to Near vs Far")
+```
+
