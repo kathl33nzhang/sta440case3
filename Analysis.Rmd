@@ -9,6 +9,8 @@ output: html_document
 library(tidyverse)
 library(lubridate)
 library(ggrepel)
+library(knitr)
+library(kableExtra)
 ```
 
 ```{r}
@@ -67,7 +69,7 @@ summaries <- list(
 summaries
 ```
 
-# Call concentration & ambulance utilization
+# Call concentration 
 
 ```{r, fig.width=12, fig.height=6}
 
@@ -113,7 +115,10 @@ ggplot(ems_plot, aes(lon, lat)) +
   )
 ```
 
+# Ambulance Utilization
+
 ```{r}
+# --- 0) Clean datetimes & keep valid intervals ---
 ems <- ems %>%
   mutate(
     DT.DISP      = as_datetime(DT.DISP),
@@ -122,55 +127,113 @@ ems <- ems %>%
   filter(!is.na(VEH.GRID), !is.na(DT.DISP), !is.na(DT.AVAILABLE),
          DT.AVAILABLE >= DT.DISP)
 
-# Observation window (used for utilization denominators)
+# If two calls for the same ambulance overlap (due to logging quirks, delays, or bad timestamps), the code double-counts that unit as busy twice at the same time.
+ems %>%
+  arrange(VEH.GRID, DT.DISP) %>%
+  group_by(VEH.GRID) %>%
+  mutate(overlap = DT.DISP < lag(DT.AVAILABLE)) %>%
+  filter(overlap == TRUE)
+
+# Distinct vehicles present (sanity)
+n_units <- n_distinct(ems$VEH.GRID)
+if (n_units != 4) message("Note: dataset has ", n_units, " distinct VEH.GRID values.")
+
+# Observation window (for utilization denominators)
 t_start <- min(ems$DT.DISP, na.rm = TRUE)
 t_end   <- max(ems$DT.AVAILABLE, na.rm = TRUE)
 obs_seconds <- as.numeric(t_end - t_start, units = "secs")
 
-# ---- 1) Build a global event timeline (+1 at dispatch, -1 at available) ----
-events <- ems %>%
-  transmute(VEH.GRID, start = DT.DISP, end = DT.AVAILABLE) %>%
-  pivot_longer(c(start, end), names_to = "etype", values_to = "time") %>%
-  mutate(delta = if_else(etype == "start", 1L, -1L))
+# --- 1) Merge overlapping intervals within each vehicle ---
+# Convert to numeric seconds for cummax, then back to POSIXct
+ems_intervals <- ems %>%
+  transmute(VEH.GRID,
+            start_num = as.numeric(DT.DISP),
+            end_num   = as.numeric(DT.AVAILABLE)) %>%
+  arrange(VEH.GRID, start_num, end_num) %>%
+  group_by(VEH.GRID) %>%
+  mutate(
+    prev_cummax_end = lag(cummax(end_num), default = first(start_num) - 1),
+    new_block = start_num > prev_cummax_end,
+    block_id  = cumsum(new_block)
+  ) %>%
+  group_by(VEH.GRID, block_id) %>%
+  summarise(start_num = min(start_num),
+            end_num   = max(end_num),
+            .groups = "drop") %>%
+  mutate(start = as_datetime(start_num),
+         end   = as_datetime(end_num)) %>%
+  select(VEH.GRID, start, end) %>%
+  arrange(VEH.GRID, start, end)
 
-# Important tie-break: if a unit becomes available at the same instant another dispatch occurs,
-# process the -1 (end) BEFORE the +1 (start) so we don't briefly overcount.
-events <- events %>% arrange(time, desc(delta))  # -1 before +1 at identical timestamps
+```
+
+```{r}
+
+# --- 2) Build global event timeline (+1 at start, -1 at end) ---
+events <- ems_intervals %>%
+  pivot_longer(c(start, end), names_to = "etype", values_to = "time") %>%
+  mutate(delta = if_else(etype == "start", 1L, -1L)) %>%
+  arrange(time, desc(delta))   # process -1 before +1 at identical timestamps
 
 timeline <- events %>%
   transmute(time, delta) %>%
   arrange(time) %>%
-  mutate(active = cumsum(delta)) %>%
-  mutate(time_next = lead(time),
-         seg_sec   = as.numeric(time_next - time, units = "secs")) %>%
+  mutate(active = cumsum(delta),
+         time_next = lead(time),
+         seg_sec   = as.numeric(time_next - time, "secs")) %>%
   filter(!is.na(time_next), seg_sec > 0)
 
+# --- 3) Duration-weighted summary of simultaneous busy vehicles (capped at 4) ---
+timeline <- timeline %>% mutate(active_capped = pmin(active, 4L))
+
 simul_summary <- timeline %>%
-  group_by(active) %>%
+  group_by(active = active_capped) %>%
   summarise(total_sec = sum(seg_sec), .groups = "drop") %>%
-  mutate(pct_of_time = total_sec / sum(total_sec))
+  mutate(pct_of_time = total_sec / sum(total_sec)) %>%
+  arrange(active)
 
 simul_summary
-# > table with rows: active=0,1,2,3,4 (how often the system had that many units busy)
-# pct_of_time is the fraction of the entire observed time.
+# active should now be 0..4 only
 
+```
+
+```{r}
+library(knitr)
+library(kableExtra)
+
+simul_summary %>%
+  mutate(
+    `Active ambulances` = active,
+    `Total time (hours)` = round(total_sec / 3600, 1),
+    `% of time` = scales::percent(pct_of_time, accuracy = 0.1)
+  ) %>%
+  select(`Active ambulances`, `Total time (hours)`, `% of time`) %>%
+  kable("html", align = "c", caption = "System Load: Simultaneous Busy Ambulances") %>%
+  kable_styling(full_width = FALSE, position = "center", bootstrap_options = c("striped", "hover"))
+
+# Plot
 ggplot(simul_summary, aes(factor(active), pct_of_time)) +
   geom_col() +
   scale_y_continuous(labels = scales::percent_format()) +
   labs(x = "Simultaneous busy ambulances", y = "% of observed time",
-       title = "System load: how many ambulances are busy simultaneously")
+       title = "System load: how many ambulances are busy simultaneously (capped at 4)")
+```
 
-# ---- 3) Percent of time fully saturated (all 4 busy) & other thresholds ----
+```{r}
+
+# --- 4) Percent of time fully saturated (all 4 busy) & other thresholds ---
 pct_all_busy   <- simul_summary %>% filter(active >= 4) %>% summarise(p = sum(pct_of_time)) %>% pull(p)
 pct_three_plus <- simul_summary %>% filter(active >= 3) %>% summarise(p = sum(pct_of_time)) %>% pull(p)
 
 pct_all_busy
 pct_three_plus
-# Interpret: if pct_all_busy is tiny, saturation is rare; if sizeable, queuing/simulation matters.
 
-# ---- 4) Per-unit utilization (busy time / observation time) ----
+```
+
+```{r}
+# --- 5) Per-unit utilization (unchanged) ---
 util_by_unit <- ems %>%
-  mutate(call_sec = as.numeric(DT.AVAILABLE - DT.DISP, units = "secs")) %>%
+  mutate(call_sec = as.numeric(DT.AVAILABLE - DT.DISP, "secs")) %>%
   group_by(VEH.GRID) %>%
   summarise(busy_sec = sum(call_sec, na.rm = TRUE), .groups = "drop") %>%
   mutate(utilization = busy_sec / obs_seconds) %>%
@@ -178,13 +241,80 @@ util_by_unit <- ems %>%
 
 util_by_unit
 
-ggplot(util_by_unit, aes(reorder(VEH.GRID, utilization), utilization)) +
-  geom_col() +
-  coord_flip() +
-  scale_y_continuous(labels = scales::percent_format()) +
-  labs(x = "Ambulance (VEH.GRID)", y = "Utilization",
-       title = "Per-unit utilization over the observation window")
+# util_by_unit should already have: VEH.GRID, busy_sec, utilization
+# If you also want color by base, grab a base label for each unit (mode per unit)
+unit_base <- ems %>%
+  count(VEH.GRID, BASE.NAME) %>%
+  group_by(VEH.GRID) %>%
+  slice_max(n, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(VEH.GRID, BASE.NAME)
 
+util_plot <- util_by_unit %>%
+  left_join(unit_base, by = "VEH.GRID") %>%
+  mutate(
+    VEH.GRID = factor(VEH.GRID, levels = rev(VEH.GRID[order(utilization)])),
+    label = scales::percent(utilization, accuracy = 0.1)
+  )
+
+# medic and company matching 
+by_medic_base <- ems |>
+  count(VEH.GRID, BASE.NAME, name = "n_calls") |>
+  group_by(VEH.GRID) |>
+  mutate(pct = n_calls / sum(n_calls)) |>
+  arrange(VEH.GRID, desc(n_calls)) |>
+  ungroup()
+
+# quick look just for Company 1
+by_medic_base |> filter(BASE.NAME == "Company 1")
+
+primary_base <- by_medic_base |>
+  group_by(VEH.GRID) |>
+  slice_max(pct, with_ties = FALSE) |>
+  ungroup() |>
+  select(VEH.GRID, primary_base = BASE.NAME, share_at_primary = pct)
+
+util_by_base <- ems |>
+  mutate(call_sec = as.numeric(DT.AVAILABLE - DT.DISP, "secs")) |>
+  group_by(BASE.NAME) |>
+  summarise(busy_sec = sum(call_sec, na.rm = TRUE), .groups="drop") |>
+  mutate(utilization = busy_sec / obs_seconds)
+
+ggplot(by_medic_base, aes(x = reorder(VEH.GRID, -n_calls), y = pct, fill = BASE.NAME)) +
+  geom_col(width = 0.7, color = "grey20") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "Medic (VEH.GRID)", y = "Share of calls by base",
+       title = "Where each medic runs from (call share by base)") +
+  coord_flip() + theme_minimal(base_size = 12) +
+  theme(panel.grid.major.y = element_blank(), legend.position = "top")
+
+
+```
+
+```{r}
+ggplot(util_plot, aes(x = VEH.GRID, y = utilization, fill = BASE.NAME)) +
+  geom_col(width = 0.7, color = "grey20") +
+  geom_text(aes(label = label), hjust = -0.1, size = 3.6, color = "grey10") +
+  coord_flip(clip = "off") +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.10))) +
+  scale_fill_brewer(palette = "Set2", na.value = "grey70", name = "Base") +
+  labs(
+    title = "Per-unit utilization over the observation window",
+    subtitle = "Percentage of time each ambulance was busy (dispatch → available)",
+    x = "Ambulance (VEH.GRID)",
+    y = "Utilization"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title.y = element_text(margin = margin(r = 10)),
+    axis.title.x = element_text(margin = margin(t = 6)),
+    plot.title = element_text(face = "bold"),
+    legend.position = "top",
+    legend.title = element_text(face = "bold"),
+    plot.margin = margin(10, 30, 10, 10) # room for labels on the right
+  )
 ```
 
 # Compare Near vs. Far North sites
@@ -301,4 +431,3 @@ ggplot(ems, aes(REF.GRID, response_time_min, fill = REF.GRID)) +
   labs(x = "", y = "Response time (min)", title = "Observed response times by region") +
   theme(legend.position = "none")
 ```
-
