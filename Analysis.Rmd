@@ -408,6 +408,65 @@ ems |>
   labs(x = "", y = "UA minutes", title = "North calls: UA time to Near vs Far")
 ```
 
+```{r}
+#sanity check that near north min should be lower in all these cats:
+
+ems %>%
+  filter(REF.GRID == "North") %>%
+  group_by(closer_north) %>%
+  summarise(
+    across(
+      c(disp_to_enroute_min, response_time_min, on_scene_min,
+        to_hospital_min, at_hospital_min, total_call_min),
+      ~ mean(.x, na.rm = TRUE),
+      .names = "mean_{.col}"
+    ),
+    n = n()
+  )
+
+ems %>%
+  filter(REF.GRID == "North") %>%
+  select(closer_north, response_time_min,
+         to_hospital_min, total_call_min) %>%
+    # select(closer_north, disp_to_enroute_min, response_time_min, on_scene_min,
+         # to_hospital_min, at_hospital_min, total_call_min) %>%
+  pivot_longer(-closer_north, names_to = "stage", values_to = "minutes") %>%
+  ggplot(aes(x = closer_north, y = minutes, fill = closer_north)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  facet_wrap(~ stage, scales = "free_y") +
+  labs(x = "", y = "Minutes", title = "North Calls: Near vs. Far North Times") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+ems %>%
+  filter(REF.GRID == "North") %>%
+  select(closer_north, response_time_min, to_hospital_min, total_call_min) %>%
+  pivot_longer(-closer_north, names_to = "stage", values_to = "minutes") %>%
+  mutate(stage = recode(stage,
+                        response_time_min = "Response Time",
+                        to_hospital_min   = "Transport to Hospital",
+                        total_call_min    = "Total Call Duration")) %>%
+  ggplot(aes(x = closer_north, y = minutes, fill = closer_north)) +
+  geom_boxplot(width = 0.6, outlier.alpha = 0.15) +
+  facet_wrap(~ stage, scales = "free_y", nrow = 1) +
+  scale_fill_manual(values = c("Near North" = "#1f77b4",
+                               "Far North"  = "#ff7f0e")) +
+  labs(
+    x = NULL, 
+    y = "Minutes", 
+    title = "North Calls: Near vs. Far North"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "top",
+    legend.title = element_blank(),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey40")
+  )
+```
+
+
 # Other
 
 ```{r}
