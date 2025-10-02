@@ -301,4 +301,111 @@ ggplot(ems, aes(REF.GRID, response_time_min, fill = REF.GRID)) +
   labs(x = "", y = "Response time (min)", title = "Observed response times by region") +
   theme(legend.position = "none")
 ```
+Near vs Far North Station
+
+```{r}
+north_diffs <- ems %>%
+  filter(REF.GRID == "North", !is.na(eTT.UA.NN), !is.na(eTT.UA.FN)) %>%
+  mutate(diff_min = (eTT.UA.NN - eTT.UA.FN)/60)
+
+north_diffs %>%
+  summarise(mean_diff = mean(diff_min, na.rm=TRUE),
+            median_diff = median(diff_min, na.rm=TRUE),
+            pct_near_faster = mean(diff_min < 0, na.rm=TRUE))
+
+ggplot(north_diffs, aes(diff_min)) +
+  geom_histogram(bins = 40, fill="steelblue") +
+  geom_vline(aes(xintercept = mean(diff_min, na.rm=TRUE)), linetype="dashed") +
+  labs(x = "Near – Far (minutes)", y = "Calls",
+       title = "North calls: time difference Near vs Far")
+
+```
+
+Move South truck vs. move a Central truck
+
+View call share by region vs. number of units assigned to decide if South is “under-trucked.”
+
+```{r}
+ems %>%
+  count(REF.GRID) %>%
+  mutate(call_share = n/sum(n))
+
+tibble(base = c("Central","South"),
+       trucks = c(3,1),
+       truck_share = trucks/sum(trucks))
+
+```
+Compare above side-by-side:
+```{r}
+# Call share by region
+call_share <- ems %>%
+  count(REF.GRID) %>%
+  mutate(metric = "Calls",
+         share = n / sum(n)) %>%
+  select(name = REF.GRID, metric, share)
+
+# Truck share by base
+truck_share <- tibble(
+  name   = c("Central","South"),
+  trucks = c(3,1)
+) %>%
+  mutate(metric = "Trucks",
+         share = trucks / sum(trucks)) %>%
+  select(name, metric, share)
+
+# Combine
+compare_share <- bind_rows(call_share, truck_share)
+
+# Plot: grouped bar chart
+ggplot(compare_share, aes(x = name, y = share, fill = metric)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Region/Base",
+       y = "Share (%)",
+       fill = "",
+       title = "Comparison of % Calls vs % Trucks") +
+  theme_minimal()
+
+```
+
+
+
+```{r}
+north_value <- ems %>%
+  mutate(best_current = pmin(eTT.UA.Ce, eTT.UA.So, na.rm=TRUE),
+         best_with_north = pmin(eTT.UA.Ce, eTT.UA.So, eTT.UA.NN, eTT.UA.FN, na.rm=TRUE),
+         saving_min = (best_current - best_with_north)/60)
+
+north_value %>%
+  summarise(mean_saving = mean(saving_min, na.rm=TRUE),
+            median_saving = median(saving_min, na.rm=TRUE),
+            pct_improved = mean(saving_min > 0, na.rm=TRUE))
+
+```
+Visualization of above:
+```{r}
+ggplot(north_value, aes(saving_min)) +
+  geom_histogram(bins = 40, fill = "steelblue", color = "white", alpha = 0.8) +
+  geom_vline(aes(xintercept = mean(saving_min, na.rm = TRUE)),
+             linetype = "dashed", color = "red") +
+  labs(
+    x = "Minutes saved with North station (UA-based)",
+    y = "Number of calls",
+    title = "Distribution of response time savings with a North station"
+  ) +
+  theme_minimal()
+```
+```{r}
+ggplot(north_value, aes(saving_min)) +
+  geom_density(fill = "steelblue", alpha = 0.6) +
+  geom_vline(aes(xintercept = mean(saving_min, na.rm = TRUE)),
+             linetype = "dashed", color = "red") +
+  labs(
+    x = "Minutes saved with North station (UA-based)",
+    y = "Density",
+    title = "Distribution of response time savings with a North station"
+  ) +
+  theme_minimal()
+
+```
 

@@ -1,0 +1,845 @@
+---
+title: "analysis"
+format: pdf
+---
+
+```{r}
+rm(list = ls())
+library(tidyverse)
+library(ggrepel)
+```
+
+```{r}
+load("emsData.RData")
+
+df <- x
+
+```
+
+```{r}
+#Clean datetime information without additional labels in df
+
+.parse_time <- function(x) if (inherits(x, "POSIXt")) x else as.POSIXct(x, format = "%m/%d/%Y %H:%M:%S", tz = "America/New_York")
+
+existing_time_cols <- c("DT.DISP","DT.ENROUTE","DT.ARRIVE","DT.LVREF","DT.ARVREC","DT.AVAILABLE")
+
+df <- df |>
+  mutate(across(all_of(existing_time_cols), .parse_time))
+
+df <- df |>
+  mutate(
+    HOUR_DISP = if ("DT.DISP" %in% names(df)) hour(`DT.DISP`) else NA_integer_,
+    WDAY_DISP = if ("DT.DISP" %in% names(df)) wday(`DT.DISP`, label = TRUE, week_start = 1) else NA,
+    MONTH_DISP = if ("DT.DISP" %in% names(df)) floor_date(`DT.DISP`, "month") else as.Date(NA)
+  )
+
+
+
+```
+
+```{r}
+#Delta-oriented new variables -> look at accumulated time over events of interest
+
+df <- df |>
+  mutate(
+    timeToEnroute_sec     = 
+                               as.numeric(difftime(`DT.ENROUTE`, `DT.DISP`, units="secs")), 
+    responseTime_sec      = 
+                               as.numeric(difftime(`DT.ARRIVE`, `DT.ENROUTE`, units="secs")),
+    onScene_sec           =
+                               as.numeric(difftime(`DT.LVREF`, `DT.ARRIVE`, units="secs")),
+    sceneToHospital_sec   = 
+                               as.numeric(difftime(`DT.ARVREC`, `DT.LVREF`, units="secs")),
+    atHospital_sec        =
+                               as.numeric(difftime(`DT.AVAILABLE`, `DT.ARVREC`, units="secs")),
+    arriveToClear_sec     = 
+                               as.numeric(difftime(`DT.AVAILABLE`, `DT.ARRIVE`, units="secs")), 
+    dispatchToClear_sec   = 
+                               as.numeric(difftime(`DT.AVAILABLE`, `DT.DISP`, units="secs")),
+  )
+```
+
+```{r}
+#Response distribution - note right skew
+
+ggplot(df, aes(x = responseTime_sec)) +
+  geom_histogram(binwidth = 60) +
+  scale_x_continuous("Response time (seconds)", breaks = seq(0, 3600, 300)) +
+  labs(title = "Distribution of Response Time")
+
+
+ggplot(df, aes(x = `BASE.NAME`, y = responseTime_sec)) +
+  geom_boxplot(outlier.alpha = 0.3) +
+  coord_flip() +
+  labs(x = "BASE.NAME", y = "Response time (sec)", title = "Response Time by Station")
+
+```
+
+```{r}
+df <- df |>
+  mutate(
+    REGION = str_extract(`REF.GRID`, "(North|Central|South)"),
+    REGION = factor(REGION, levels = c("South", "Central", "North"))
+  )
+```
+
+```{r}
+#Region-level service comparisons
+
+df |>
+  filter(!is.na(REGION)) |>
+  group_by(REGION) |>
+  summarise(
+    calls = n(),
+    median_response_sec = median(responseTime_sec, na.rm = TRUE),
+    p90_response_sec = quantile(responseTime_sec, 0.90, na.rm = TRUE),
+    median_scene_sec = median(onScene_sec, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(calls))
+df |>
+  filter(!is.na(REGION)) |>
+  ggplot(aes(REGION, responseTime_sec, fill = REGION)) +
+  geom_boxplot(outlier.alpha = 0.25) +
+  scale_y_continuous("Response time (sec)") +
+  labs(title = "Response Times by County Region") +
+  guides(fill = "none")
+
+```
+
+```{r}
+#Temporal calling distribution
+
+df |>
+  count(HOUR_DISP) |>
+  ggplot(aes(HOUR_DISP, n)) +
+  geom_line() +
+  scale_x_continuous(breaks = 0:23) +
+  labs(x = "Hour of Day (from DT.DISP)", y = "Calls",
+       title = "Average Calls by Hour")
+
+
+df |>
+  count(WDAY_DISP, HOUR_DISP) |>
+  ggplot(aes(factor(HOUR_DISP), WDAY_DISP, fill = n)) +
+  geom_tile() +
+  labs(x = "Hour", y = "Day of Week", title = "Calls by Hour × Day (Dispatch)")
+
+
+```
+
+```{r}
+
+gps.cent<-unique(df$VEHCGPS[x$BASE.NAME=="Company 9"])
+
+gps.south<-unique(df$VEHCGPS[x$BASE.NAME=="Company 1"])
+
+gps.centN<-as.numeric(strsplit(gps.cent,",")[[1]])
+
+gps.southN<-as.numeric(strsplit(gps.south,",")[[1]])
+## First option for a north station
+gps.northNN<-c(36.430596, -78.431689) ##NN=Near North
+##Second option for north station
+gps.northFN<-c(36.495537112943886,-78.42090194629898) ##FN=Far North
+## GPS coordinates of Maria Parham Hospital
+gps.hospital<-c(36.33089064918619, -78.44930886477614)
+```
+
+```{r}
+mph.lon<-(-78.44930886477614)
+mph.lat <- (36.33089064918619)
+gmc.lon<-(-78.59367173834997)
+gmc.lat<-(36.33043072571129)
+dh.lon<-(-78.93687608445487)
+dh.lat<-(36.00643609468812)
+```
+
+```{r}
+pois <- data.frame(
+  name = c("Central", "South", "Near North", "Far North", "Maria Parham Hospital", 
+           "Granville Medical Center", "Duke Hospital"),
+  lat  = c(gps.centN[1], gps.southN[1] ,36.430596, 36.495537112943886, mph.lat, gmc.lat, dh.lat),
+  lon  = c(gps.centN[2], gps.southN[2],-78.431689, -78.42090194629898, mph.lon, gmc.lon, dh.lon)
+)
+```
+
+```{r}
+
+df |>
+  group_by(`BASE.NAME`) |>
+  summarise(
+    n = n(),
+    median_resp = median(responseTime_sec, na.rm = TRUE),
+    p90_resp    = quantile(responseTime_sec, 0.90, na.rm = TRUE),
+    iqr_resp    = IQR(responseTime_sec, na.rm = TRUE),
+    mean_resp = mean(responseTime_sec, na.rm=TRUE),
+    std_resp= sd(responseTime_sec, na.rm=TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(n))
+
+
+df |>
+  group_by(`REC.NAME`) |>
+  summarise(
+    n = n(),
+    median_transport = median(sceneToHospital_sec, na.rm = TRUE),
+    p90_transport    = quantile(sceneToHospital_sec, 0.90, na.rm = TRUE),
+    mean_transport = mean(sceneToHospital_sec, na.rm = TRUE),
+    std_transport = sd(sceneToHospital_sec, na.rm=TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(n))
+
+```
+
+```{r}
+#Travel-time comparisons under proposed station scenarios
+
+scenario_best_guess <- df |>
+  mutate(
+    eTT_S0 = pmin(eTT.BG.Ce, eTT.BG.So, na.rm = TRUE),
+    eTT_S1 = pmin(eTT.BG.Ce, eTT.BG.NN, na.rm = TRUE),
+    eTT_S2 = pmin(eTT.BG.Ce, eTT.BG.FN, na.rm = TRUE),
+    eTT_S3 = pmin(eTT.BG.So, eTT.BG.NN, na.rm = TRUE),
+    eTT_S4 = pmin(eTT.BG.So, eTT.BG.FN, na.rm = TRUE)
+  ) |>
+  select(REGION, starts_with("eTT_S")) |>
+  pivot_longer(
+    cols = starts_with("eTT_S"),
+    names_to = "scenario",
+    values_to = "best_guess_sec"
+  ) |>
+  mutate(
+    scenario = factor(
+      scenario,
+      levels = c("eTT_S0", "eTT_S1", "eTT_S2", "eTT_S3", "eTT_S4"),
+      labels = c("S0: Current", "S1: Near North + Central", "S2: Far North + Central",
+                 "S3: Near North + South", "S4: Far North + South")
+    )
+  )
+scenario_summary <- scenario_best_guess |>
+  group_by(REGION, scenario) |>
+  summarise(
+    calls = n(),
+    median_best_sec = median(best_guess_sec, na.rm = TRUE),
+    p90_best_sec = quantile(best_guess_sec, 0.90, na.rm = TRUE),
+    .groups = "drop"
+  )
+scenario_summary
+scenario_best_guess |>
+  filter(!is.na(REGION)) |>
+  ggplot(aes(scenario, best_guess_sec, color = REGION)) +
+  geom_boxplot(outlier.alpha = 0.15) +
+  coord_flip() +
+  scale_y_continuous("Travel time best guess (sec)") +
+  labs(title = "Google Best-Guess Travel Times Under Each Scenario",
+       x = NULL, color = "Region")
+```
+```{r}
+#Focus on North-region calls to understand the magnitude of potential gains
+north_effects <- scenario_summary |>
+  filter(REGION == "North") |>
+  select(scenario, median_best_sec) |>
+  mutate(
+    delta_vs_current_sec = median_best_sec - median_best_sec[scenario == "S0: Current"],
+    delta_vs_current_min = delta_vs_current_sec / 60
+  )
+north_effects
+```
+
+```{r}
+#Utilisation of individual ambulances over the study window
+analysis_window_sec <- as.numeric(
+  difftime(max(df$DT.AVAILABLE, na.rm = TRUE), min(df$DT.DISP, na.rm = TRUE), units = "secs")
+)
+vehicle_utilisation <- df |>
+  filter(!is.na(`VEH.GRID`)) |>
+  group_by(`VEH.GRID`, `BASE.NAME`) |>
+  summarise(
+    trips = n(),
+    busy_time_sec = sum(dispatchToClear_sec, na.rm = TRUE),
+    median_assignment_sec = median(dispatchToClear_sec, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(utilisation = busy_time_sec / analysis_window_sec)
+vehicle_utilisation |>
+  arrange(desc(utilisation))
+vehicle_utilisation |>
+  ggplot(aes(fct_reorder(`VEH.GRID`, utilisation), utilisation, fill = `BASE.NAME`)) +
+  geom_col() +
+  coord_flip() +
+  scale_y_continuous("Fraction of time busy", labels = scales::percent_format(accuracy = 1)) +
+  labs(x = "Ambulance ID", title = "Estimated Ambulance Utilisation") +
+  guides(fill = guide_legend(title = "Home Base"))
+```
+
+```{r}
+p1 <- ggplot(df, aes(x = `REF.GPS.LON`, y = `REF.GPS.LAT`, color = `BASE.NAME`)) +
+  geom_point(alpha = 0.45, size = 1) +
+  coord_equal() +
+  labs(x = "Longitude", y = "Latitude", title = "Call Locations by Responding Station")
+
+
+p2 <- ggplot(df, aes(x = `REF.GPS.LON`, y = `REF.GPS.LAT`, color = `REC.NAME`)) +
+  geom_point(alpha = 0.45, size = 1) +
+  coord_equal() +
+  labs(x = "Longitude", y = "Latitude", title = "Call Locations by Destination")
+
+p1 +
+  geom_point(data = pois,
+             aes(x = lon, y = lat),
+             inherit.aes = FALSE,
+             size = 2, color = "red") +
+  geom_text_repel(data = pois,
+                  aes(x = lon, y = lat, label = name),
+                  inherit.aes = FALSE,
+                  size = 3.5)
+
+p2 +
+  geom_point(data = pois,
+             aes(x = lon, y = lat),
+             inherit.aes = FALSE,
+             size = 2, color = "red") +
+  geom_text_repel(data = pois,
+                  aes(x = lon, y = lat, label = name),
+                  inherit.aes = FALSE,
+                  size = 3.5)
+
+```
+
+```{r}
+#Events where multiple calls overlap -> potential stress on the broader ambulance system
+
+events_tbl <- df |>
+  select(`DT.DISP`, `DT.AVAILABLE`, REF.GPS.LAT, REF.GPS.LON, 
+         eTT.BG.So, eTT.BG.Ce, eTT.BG.FN, eTT.BG.NN) |>
+  pivot_longer(
+    cols = c(`DT.DISP`, `DT.AVAILABLE`),
+    names_to = "endpoint",
+    values_to = "ts"
+  ) |>
+  mutate(
+    delta = case_when(
+      endpoint == "DT.DISP"      ~  1L,
+      endpoint == "DT.AVAILABLE" ~ -1L,
+      TRUE ~ 0L
+    )
+  ) |>
+  filter(!is.na(ts)) |>
+  arrange(ts, desc(delta)) |>
+  mutate(active = cumsum(delta))
+
+
+events_tbl |>
+  mutate(HOUR = hour(ts)) |>
+  group_by(HOUR) |>
+  summarise(
+    p95_active = quantile(active, 0.95, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  ggplot(aes(HOUR, p95_active)) +
+  geom_line() +
+  scale_x_continuous(breaks = 0:23) +
+  labs(
+    x = "Hour of day",
+    y = "95th percentile of concurrent incidents",
+    title = "Concurrent Incidents by Hour of Day"
+  )
+
+```
+
+```{r}
+events_tbl |>
+  filter(active >= 2) |>
+  mutate(
+    idx = max.col(-cbind(eTT.BG.So, eTT.BG.Ce, eTT.BG.FN, eTT.BG.NN), ties.method = "first"),
+    best.Station = c("South", "Central", "Far North", "Near North")[idx]
+  ) |>
+  select(-idx) |>
+  group_by(best.Station) |>
+  count()
+```
+
+
+NEW EXPERIMENT
+```{r}
+# Load required libraries
+library(tidyverse)
+library(lubridate)
+
+# Check if Region column exists, if not look for REF.GRID
+if(!"Region" %in% names(ems) && "REF.GRID" %in% names(ems)) {
+  cat("\nNote: Using REF.GRID as Region column\n")
+  ems <- ems %>% mutate(Region = REF.GRID)
+} else if(!"Region" %in% names(ems) && "Ref.Grid" %in% names(ems)) {
+  cat("\nNote: Using Ref.Grid as Region column\n")
+  ems <- ems %>% mutate(Region = Ref.Grid)
+}
+
+# Convert datetime columns to POSIXct if they aren't already
+ems <- ems %>%
+  mutate(
+    DT.DISP = as.POSIXct(DT.DISP),
+    DT.AVAILABLE = as.POSIXct(DT.AVAILABLE),
+    Hour = hour(DT.DISP),
+    DayOfWeek = wday(DT.DISP, label = TRUE),
+    Date = as.Date(DT.DISP)
+  )
+
+# Verify Region column exists
+if(!"Region" %in% names(ems)) {
+  stop("Region column not found. Please check column names above and adjust code accordingly.")
+}
+
+# Check unique regions
+cat("\nUnique Regions found:\n")
+print(unique(ems$Region))
+
+# ============================================================================
+# FUNCTION: Calculate concurrent incidents at any point in time
+# ============================================================================
+calculate_concurrent_incidents <- function(data) {
+  # Create a list of all time points (dispatch and available times)
+  time_events <- bind_rows(
+    data %>% select(time = DT.DISP, Region) %>% mutate(event = 1),  # Start
+    data %>% select(time = DT.AVAILABLE, Region) %>% mutate(event = -1)  # End
+  ) %>%
+    arrange(Region, time)
+  
+  # Calculate concurrent incidents for each region
+  concurrent <- time_events %>%
+    group_by(Region) %>%
+    arrange(time) %>%
+    mutate(concurrent = cumsum(event)) %>%
+    ungroup()
+  
+  return(concurrent)
+}
+
+# ============================================================================
+# METHOD 1: Average Concurrent Incidents by Hour of Day
+# ============================================================================
+calculate_hourly_concurrent <- function(data) {
+  # For each hour, calculate average concurrent incidents
+  hourly_stats <- data %>%
+    group_by(Region, Hour) %>%
+    summarize(
+      n_incidents = n(),
+      .groups = 'drop'
+    )
+  
+  # Alternative approach: Sample every minute and count concurrent
+  # Create sequence of all minutes in dataset
+  time_range <- range(c(data$DT.DISP, data$DT.AVAILABLE), na.rm = TRUE)
+  all_times <- seq(time_range[1], time_range[2], by = "1 min")
+  
+  # For each time point, count how many incidents are active
+  concurrent_by_time <- map_dfr(unique(data$Region), function(reg) {
+    region_data <- data %>% filter(Region == reg)
+    
+    map_dfr(all_times, function(t) {
+      concurrent_count <- sum(region_data$DT.DISP <= t & 
+                                region_data$DT.AVAILABLE >= t, 
+                              na.rm = TRUE)
+      tibble(
+        Region = reg,
+        time = t,
+        concurrent = concurrent_count,
+        hour = hour(t)
+      )
+    })
+  })
+  
+  # Average by hour
+  hourly_avg <- concurrent_by_time %>%
+    group_by(Region, hour) %>%
+    summarize(
+      avg_concurrent = mean(concurrent),
+      max_concurrent = max(concurrent),
+      .groups = 'drop'
+    )
+  
+  return(hourly_avg)
+}
+
+# ============================================================================
+# METHOD 2: Average Concurrent Incidents by Day of Week
+# ============================================================================
+calculate_daily_concurrent <- function(data) {
+  # Create sequence of all minutes in dataset
+  time_range <- range(c(data$DT.DISP, data$DT.AVAILABLE), na.rm = TRUE)
+  all_times <- seq(time_range[1], time_range[2], by = "1 min")
+  
+  # For each time point, count how many incidents are active
+  concurrent_by_time <- map_dfr(unique(data$Region), function(reg) {
+    region_data <- data %>% filter(Region == reg)
+    
+    map_dfr(all_times, function(t) {
+      concurrent_count <- sum(region_data$DT.DISP <= t & 
+                                region_data$DT.AVAILABLE >= t, 
+                              na.rm = TRUE)
+      tibble(
+        Region = reg,
+        time = t,
+        concurrent = concurrent_count,
+        day_of_week = wday(t, label = TRUE)
+      )
+    })
+  })
+  
+  # Average by day of week
+  daily_avg <- concurrent_by_time %>%
+    group_by(Region, day_of_week) %>%
+    summarize(
+      avg_concurrent = mean(concurrent),
+      max_concurrent = max(concurrent),
+      .groups = 'drop'
+    )
+  
+  return(daily_avg)
+}
+
+# ============================================================================
+# METHOD 3: Overall Average Concurrent Incidents by Region
+# ============================================================================
+calculate_overall_concurrent <- function(data) {
+  # Create sequence of all minutes in dataset
+  time_range <- range(c(data$DT.DISP, data$DT.AVAILABLE), na.rm = TRUE)
+  all_times <- seq(time_range[1], time_range[2], by = "5 min")  # Use 5 min for faster computation
+  
+  # For each time point, count how many incidents are active
+  concurrent_by_time <- map_dfr(unique(data$Region), function(reg) {
+    region_data <- data %>% filter(Region == reg)
+    
+    map_dfr(all_times, function(t) {
+      concurrent_count <- sum(region_data$DT.DISP <= t & 
+                                region_data$DT.AVAILABLE >= t, 
+                              na.rm = TRUE)
+      tibble(
+        Region = reg,
+        concurrent = concurrent_count
+      )
+    })
+  })
+  
+  # Calculate overall average
+  overall_avg <- concurrent_by_time %>%
+    group_by(Region) %>%
+    summarize(
+      avg_concurrent = mean(concurrent),
+      max_concurrent = max(concurrent),
+      median_concurrent = median(concurrent),
+      .groups = 'drop'
+    )
+  
+  return(overall_avg)
+}
+
+# ============================================================================
+# RUN ANALYSES
+# ============================================================================
+
+# Calculate concurrent incidents (this may take a few minutes for large datasets)
+cat("Calculating hourly concurrent incidents...\n")
+hourly_concurrent <- calculate_hourly_concurrent(ems)
+
+cat("Calculating daily concurrent incidents...\n")
+daily_concurrent <- calculate_daily_concurrent(ems)
+
+cat("Calculating overall concurrent incidents...\n")
+overall_concurrent <- calculate_overall_concurrent(ems)
+
+# ============================================================================
+# VISUALIZATIONS
+# ============================================================================
+
+# Plot 1: Average Concurrent Incidents by Hour of Day
+p1 <- ggplot(hourly_concurrent, aes(x = hour, y = avg_concurrent, color = Region, group = Region)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    title = "Average Concurrent EMS Incidents by Hour of Day",
+    subtitle = "Comparing North, South, and Central Regions",
+    x = "Hour of Day (0-23)",
+    y = "Average Number of Concurrent Incidents",
+    color = "Region"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom"
+  ) +
+  scale_x_continuous(breaks = seq(0, 23, 2))
+
+# Plot 2: Average Concurrent Incidents by Day of Week
+p2 <- ggplot(daily_concurrent, aes(x = day_of_week, y = avg_concurrent, fill = Region)) +
+  geom_col(position = "dodge") +
+  labs(
+    title = "Average Concurrent EMS Incidents by Day of Week",
+    subtitle = "Comparing North, South, and Central Regions",
+    x = "Day of Week",
+    y = "Average Number of Concurrent Incidents",
+    fill = "Region"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom"
+  )
+
+# Plot 3: Overall Average Concurrent Incidents by Region
+p3 <- ggplot(overall_concurrent, aes(x = reorder(Region, -avg_concurrent), y = avg_concurrent, fill = Region)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = round(avg_concurrent, 2)), vjust = -0.5, size = 5) +
+  labs(
+    title = "Overall Average Concurrent EMS Incidents by Region",
+    x = "Region",
+    y = "Average Number of Concurrent Incidents"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14)
+  ) +
+  scale_fill_brewer(palette = "Set2")
+
+# Display plots
+print(p1)
+print(p2)
+print(p3)
+```
+
+```{r}
+# ============================================================================
+# EMERGENCY CALLS ONLY - Concurrent Incidents Analysis
+# ============================================================================
+# This assumes you've already loaded the data and have the 'ems' dataframe
+
+library(tidyverse)
+library(lubridate)
+
+# Filter for Emergency calls only
+cat("Filtering for Emergency calls only...\n")
+
+# Create emergency dataset with Region column
+ems_emergency <- ems %>%
+  # Add Region column if not already present
+  {if(!"Region" %in% names(.)) {
+    if("REF.GRID" %in% names(.)) mutate(., Region = REF.GRID)
+    else if("Ref.Grid" %in% names(.)) mutate(., Region = Ref.Grid)
+    else .
+  } else .} %>%
+  # Filter for Emergency priority
+  {if("DISPATCH.PRIORITY.NAME" %in% names(.)) {
+    filter(., DISPATCH.PRIORITY.NAME == "Emergency")
+  } else if("Dispatch.Priority.Name" %in% names(.)) {
+    filter(., Dispatch.Priority.Name == "Emergency")
+  } else if("DISPATCH.PRIORITY" %in% names(.)) {
+    filter(., DISPATCH.PRIORITY == "Emergency")
+  } else .} %>%
+  # Ensure datetime columns are correct format
+  mutate(
+    DT.DISP = as.POSIXct(DT.DISP),
+    DT.AVAILABLE = as.POSIXct(DT.AVAILABLE)
+  )
+
+cat(sprintf("Number of Emergency calls: %d\n", nrow(ems_emergency)))
+cat("Regions found:\n")
+print(table(ems_emergency$Region))
+
+# ============================================================================
+# Calculate Hourly Concurrent Emergency Incidents
+# ============================================================================
+calculate_hourly_concurrent_emergency <- function(data) {
+  time_range <- range(c(data$DT.DISP, data$DT.AVAILABLE), na.rm = TRUE)
+  all_times <- seq(time_range[1], time_range[2], by = "1 min")
+  
+  concurrent_by_time <- map_dfr(unique(data$Region), function(reg) {
+    region_data <- data %>% filter(Region == reg)
+    
+    map_dfr(all_times, function(t) {
+      concurrent_count <- sum(region_data$DT.DISP <= t & 
+                                region_data$DT.AVAILABLE >= t, 
+                              na.rm = TRUE)
+      tibble(
+        Region = reg,
+        time = t,
+        concurrent = concurrent_count,
+        hour = hour(t)
+      )
+    })
+  })
+  
+  hourly_avg <- concurrent_by_time %>%
+    group_by(Region, hour) %>%
+    summarize(
+      avg_concurrent = mean(concurrent),
+      max_concurrent = max(concurrent),
+      .groups = 'drop'
+    )
+  
+  return(hourly_avg)
+}
+
+# ============================================================================
+# Calculate Daily Concurrent Emergency Incidents
+# ============================================================================
+calculate_daily_concurrent_emergency <- function(data) {
+  time_range <- range(c(data$DT.DISP, data$DT.AVAILABLE), na.rm = TRUE)
+  all_times <- seq(time_range[1], time_range[2], by = "1 min")
+  
+  concurrent_by_time <- map_dfr(unique(data$Region), function(reg) {
+    region_data <- data %>% filter(Region == reg)
+    
+    map_dfr(all_times, function(t) {
+      concurrent_count <- sum(region_data$DT.DISP <= t & 
+                                region_data$DT.AVAILABLE >= t, 
+                              na.rm = TRUE)
+      tibble(
+        Region = reg,
+        time = t,
+        concurrent = concurrent_count,
+        day_of_week = wday(t, label = TRUE)
+      )
+    })
+  })
+  
+  daily_avg <- concurrent_by_time %>%
+    group_by(Region, day_of_week) %>%
+    summarize(
+      avg_concurrent = mean(concurrent),
+      max_concurrent = max(concurrent),
+      .groups = 'drop'
+    )
+  
+  return(daily_avg)
+}
+
+# ============================================================================
+# Calculate Overall Concurrent Emergency Incidents
+# ============================================================================
+calculate_overall_concurrent_emergency <- function(data) {
+  time_range <- range(c(data$DT.DISP, data$DT.AVAILABLE), na.rm = TRUE)
+  all_times <- seq(time_range[1], time_range[2], by = "5 min")
+  
+  concurrent_by_time <- map_dfr(unique(data$Region), function(reg) {
+    region_data <- data %>% filter(Region == reg)
+    
+    map_dfr(all_times, function(t) {
+      concurrent_count <- sum(region_data$DT.DISP <= t & 
+                                region_data$DT.AVAILABLE >= t, 
+                              na.rm = TRUE)
+      tibble(
+        Region = reg,
+        concurrent = concurrent_count
+      )
+    })
+  })
+  
+  overall_avg <- concurrent_by_time %>%
+    group_by(Region) %>%
+    summarize(
+      avg_concurrent = mean(concurrent),
+      max_concurrent = max(concurrent),
+      median_concurrent = median(concurrent),
+      .groups = 'drop'
+    )
+  
+  return(overall_avg)
+}
+
+# ============================================================================
+# RUN ANALYSES FOR EMERGENCY CALLS
+# ============================================================================
+
+cat("\nCalculating hourly concurrent emergency incidents...\n")
+hourly_emergency <- calculate_hourly_concurrent_emergency(ems_emergency)
+
+cat("Calculating daily concurrent emergency incidents...\n")
+daily_emergency <- calculate_daily_concurrent_emergency(ems_emergency)
+
+cat("Calculating overall concurrent emergency incidents...\n")
+overall_emergency <- calculate_overall_concurrent_emergency(ems_emergency)
+
+# ============================================================================
+# VISUALIZATIONS - EMERGENCY CALLS ONLY
+# ============================================================================
+
+# Plot 1: Average Concurrent Emergency Incidents by Hour of Day
+p1_emergency <- ggplot(hourly_emergency, aes(x = hour, y = avg_concurrent, color = Region, group = Region)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    title = "Average Concurrent Emergency Incidents by Hour of Day",
+    subtitle = "Comparing North, South, and Central Regions (Emergency Calls Only)",
+    x = "Hour of Day (0-23)",
+    y = "Average Number of Concurrent Emergency Incidents",
+    color = "Region"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom"
+  ) +
+  scale_x_continuous(breaks = seq(0, 23, 2))
+
+# Plot 2: Average Concurrent Emergency Incidents by Day of Week
+p2_emergency <- ggplot(daily_emergency, aes(x = day_of_week, y = avg_concurrent, fill = Region)) +
+  geom_col(position = "dodge") +
+  labs(
+    title = "Average Concurrent Emergency Incidents by Day of Week",
+    subtitle = "Comparing North, South, and Central Regions (Emergency Calls Only)",
+    x = "Day of Week",
+    y = "Average Number of Concurrent Emergency Incidents",
+    fill = "Region"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom"
+  )
+
+# Plot 3: Overall Average Concurrent Emergency Incidents by Region
+p3_emergency <- ggplot(overall_emergency, aes(x = reorder(Region, -avg_concurrent), y = avg_concurrent, fill = Region)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = round(avg_concurrent, 2)), vjust = -0.5, size = 5) +
+  labs(
+    title = "Overall Average Concurrent Emergency Incidents by Region",
+    subtitle = "Emergency Calls Only",
+    x = "Region",
+    y = "Average Number of Concurrent Emergency Incidents"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14)
+  ) +
+  scale_fill_brewer(palette = "Set2")
+
+# Display plots
+print(p1_emergency)
+print(p2_emergency)
+print(p3_emergency)
+
+# ============================================================================
+# SUMMARY STATISTICS - EMERGENCY CALLS
+# ============================================================================
+
+cat("\n=== EMERGENCY CALLS SUMMARY STATISTICS ===\n\n")
+
+cat("Overall Average Concurrent Emergency Incidents by Region:\n")
+print(overall_emergency)
+
+cat("\n\nPeak Hours for Emergency Calls by Region:\n")
+peak_hours_emergency <- hourly_emergency %>%
+  group_by(Region) %>%
+  slice_max(avg_concurrent, n = 3) %>%
+  arrange(Region, desc(avg_concurrent))
+print(peak_hours_emergency)
+
+cat("\n\nBusiest Days for Emergency Calls by Region:\n")
+busiest_days_emergency <- daily_emergency %>%
+  group_by(Region) %>%
+  slice_max(avg_concurrent, n = 3) %>%
+  arrange(Region, desc(avg_concurrent))
+print(busiest_days_emergency)
+```
