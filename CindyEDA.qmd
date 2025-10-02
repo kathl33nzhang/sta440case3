@@ -1,0 +1,348 @@
+---
+title: "Cindy EDA"
+format: pdf
+---
+
+```{r}
+rm(list = ls())
+library(tidyverse)
+library(ggrepel)
+library(lubridate)
+```
+
+```{r}
+load("emsData.RData")
+ems <- x
+rm(x)
+```
+
+```{r}
+TZ <- "America/New_York"
+
+ems_clean <- ems %>%
+  filter(!is.na(DT.DISP), !is.na(DT.AVAILABLE), !is.na(REF.GRID)) %>%
+  mutate(
+    # Normalize to a single local timezone
+    dispatch_time   = with_tz(as.POSIXct(DT.DISP, tz = TZ), tzone = TZ),
+    available_time  = with_tz(as.POSIXct(DT.AVAILABLE, tz = TZ), tzone = TZ),
+    region          = REF.GRID
+  ) %>%
+  filter(dispatch_time < available_time)
+```
+
+```{r}
+PAD_MIN <- 15L
+
+# Max concurrency in [win_start, win_end) using PADDED intervals
+max_conc_in_window_padded <- function(starts, ends, win_start, win_end, pad_min = PAD_MIN) {
+  if (length(starts) == 0) return(0L)
+  starts_pad <- starts - minutes(pad_min)
+  ends_pad   <- ends   + minutes(pad_min)
+
+  keep <- (starts_pad < win_end) & (ends_pad > win_start)
+  if (!any(keep)) return(0L)
+
+  starts_pad <- pmax(starts_pad[keep], win_start)
+  ends_pad   <- pmin(ends_pad[keep],   win_end)
+
+  events <- cbind(
+    time  = c(starts_pad, ends_pad),
+    delta = c(rep(1L, length(starts_pad)), rep(-1L, length(ends_pad)))
+  )
+  events <- events[order(events[, "time"], -events[, "delta"]), , drop = FALSE]
+
+  conc <- 0L; maxc <- 0L
+  for (i in seq_len(nrow(events))) {
+    conc <- conc + events[i, "delta"]
+    if (conc > maxc) maxc <- conc
+  }
+  as.integer(maxc)
+}
+```
+
+```{r}
+# all local dates by dispatch date
+ems_clean <- ems_clean %>%
+  mutate(dispatch_date = as.Date(dispatch_time, tz = TZ))
+
+all_days   <- sort(unique(ems_clean$dispatch_date))
+all_regions <- sort(unique(ems_clean$region))
+
+# create a data frame of all day-hour-region combinations
+grid <- expand.grid(
+  region = all_regions,
+  date   = all_days,
+  hour   = 0:23,
+  KEEP.OUT.ATTRS = FALSE,
+  stringsAsFactors = FALSE
+) %>%
+  mutate(
+    hour_start = as.POSIXct(paste(date, sprintf("%02d:00:00", hour)), tz = TZ),
+    hour_end   = hour_start + hours(1)
+  )
+
+# For each (region, date), restrict calls to those dispatched that date
+concurrency_results <- grid %>%
+  group_by(region, date) %>%
+  group_modify(function(.df, key) {
+    r <- key$region[1]; d <- key$date[1]
+
+    inc <- ems_clean %>%
+      filter(region == r, dispatch_date == d)
+
+    if (nrow(inc) == 0) {
+      .df$max_concurrency <- 0L
+      .df$num_calls <- 0L
+      return(.df)
+    }
+
+    starts <- inc$dispatch_time
+    ends   <- inc$available_time
+
+    # Use PADDED intervals for both metrics
+    .df$max_concurrency <- purrr::pmap_int(
+      list(.df$hour_start, .df$hour_end),
+      ~ max_conc_in_window_padded(starts, ends, ..1, ..2, PAD_MIN)
+    )
+
+    .df$num_calls <- purrr::pmap_int(
+      list(.df$hour_start, .df$hour_end),
+      ~ {
+        s_pad <- starts - minutes(PAD_MIN)
+        e_pad <- ends   + minutes(PAD_MIN)
+        sum(s_pad < ..2 & e_pad > ..1)
+      }
+    )
+
+    .df
+  }) %>%
+  ungroup() %>%
+  mutate(
+    hour_of_day = hour(hour_start),
+    day_of_week = wday(date, label = TRUE),
+    month       = month(date, label = TRUE)
+  )
+
+# Region-level summaries (now dates and hour_start dates are consistent)
+summary_stats <- concurrency_results %>%
+  group_by(region) %>%
+  summarise(
+    mean_max_concurrency   = mean(max_concurrency),
+    median_max_concurrency = median(max_concurrency),
+    max_concurrency_overall = max(max_concurrency),
+    total_hours            = n(),
+    hours_with_calls       = sum(num_calls > 0),
+    .groups = "drop"
+  )
+
+print(summary_stats)
+```
+
+```{r}
+plot_daily_timeline_stacked <- function(data, target_date) {
+  target_date <- as.Date(target_date, tz = TZ)
+
+  daily_data <- data %>%
+    dplyr::filter(as.Date(dispatch_time, tz = TZ) == target_date) %>%
+    dplyr::arrange(region, dispatch_time) %>%
+    dplyr::group_by(region) %>%
+    dplyr::mutate(
+      call_id        = dplyr::row_number(),
+      # Actual (day-anchored)
+      start_time     = as.POSIXct(paste(target_date, format(dispatch_time, "%H:%M:%S")), tz = TZ),
+      end_time_raw   = as.POSIXct(paste(target_date, format(available_time, "%H:%M:%S")), tz = TZ),
+      end_time       = dplyr::if_else(available_time < dispatch_time,
+                                      end_time_raw + lubridate::days(1),
+                                      end_time_raw),
+      # Padded (day-anchored, with spillover handling)
+      start_time_pad = start_time - lubridate::minutes(PAD_MIN),
+      end_time_pad0  = end_time + lubridate::minutes(PAD_MIN),
+      end_time_pad   = end_time_pad0,  # (already aligned to end_time which handled cross-midnight)
+      duration_mins  = as.numeric(difftime(available_time, dispatch_time, units = "mins"))
+    ) %>%
+    dplyr::ungroup()
+
+  if (nrow(daily_data) == 0) {
+    cat("No dispatches found on", as.character(target_date), "across any region.\n")
+    return(invisible(NULL))
+  }
+
+  region_order <- daily_data %>%
+    dplyr::distinct(region) %>%
+    dplyr::arrange(region) %>%
+    dplyr::pull(region)
+
+  daily_data$region <- factor(daily_data$region, levels = region_order)
+
+  region_sizes <- daily_data %>%
+    dplyr::count(region, name = "n_calls") %>%
+    dplyr::arrange(region) %>%
+    dplyr::mutate(offset = dplyr::lag(cumsum(n_calls), default = 0L))
+
+  daily_data <- daily_data %>%
+    dplyr::left_join(region_sizes, by = "region") %>%
+    dplyr::mutate(y_pos = offset + call_id)
+
+  label_positions <- region_sizes %>%
+    dplyr::mutate(y_mid = offset + ceiling(n_calls / 2))
+
+  x_min <- as.POSIXct(paste(target_date, "00:00:00"), tz = TZ)
+  x_max <- max(
+    max(daily_data$end_time_pad, na.rm = TRUE),
+    as.POSIXct(paste(target_date, "23:59:59"), tz = TZ)
+  )
+  max_y <- max(daily_data$y_pos, na.rm = TRUE)
+
+  library(ggplot2)
+  p <- ggplot(daily_data, aes(y = y_pos, color = region)) +
+    # --- PADDED interval (background) ---
+    geom_segment(
+      aes(x = start_time_pad, xend = end_time_pad, yend = y_pos),
+      linewidth = 4, alpha = 0.25
+    ) +
+    geom_point(aes(x = start_time_pad), size = 3, alpha = 0.25) +
+    geom_point(aes(x = end_time_pad),   size = 3, alpha = 0.25) +
+    # --- ACTUAL interval (foreground) ---
+    geom_segment(
+      aes(x = start_time, xend = end_time, yend = y_pos),
+      linewidth = 2, alpha = 0.9
+    ) +
+    geom_point(aes(x = start_time), size = 1.8) +
+    geom_point(aes(x = end_time),   size = 1.8) +
+    # Separators & region labels
+    geom_hline(
+      data = subset(region_sizes, offset > 0),
+      aes(yintercept = offset + 0.5),
+      linewidth = 0.3, alpha = 0.5, inherit.aes = FALSE
+    ) +
+    labs(
+      title = "EMS Dispatch Timelines",
+      subtitle = paste(format(target_date, "%B %d, %Y"), sprintf("— padding = ±%d min", PAD_MIN)),
+      x = "Time of Day",
+      y = "Call # (stacked)",
+      color = "Region",
+      caption = "Thick, faint band = padded window (±15m). Thin, vivid band = actual call."
+    ) +
+    scale_x_datetime(
+      limits = c(x_min, x_max),
+      date_labels = "%H",
+      date_breaks = "1 hour",
+      expand = c(0.03, 0.03)
+    ) +
+    scale_y_continuous(
+      breaks = seq(1, max_y, by = 1),
+      minor_breaks = NULL,
+      expand = c(0.02, 0.02)
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(size = 11),
+      panel.grid.minor = element_blank(),
+      axis.text.y = element_text(size = 7)
+    )
+
+  print(p)
+
+  # Optional console summary (unchanged, still based on actual durations)
+  cat("\nSummary by region for", as.character(target_date), ":\n")
+  daily_data %>%
+    dplyr::group_by(region) %>%
+    dplyr::summarise(
+      n_calls = dplyr::n(),
+      avg_duration_min = round(mean(duration_mins), 1),
+      med_duration_min = round(median(duration_mins), 1),
+      min_duration_min = round(min(duration_mins), 1),
+      max_duration_min = round(max(duration_mins), 1),
+      .groups = "drop"
+    ) %>% print(n = Inf)
+
+  invisible(daily_data)
+}
+
+# Example:
+plot_daily_timeline_stacked(ems_clean, "2024-01-16")
+```
+```{r}
+concurrency_results |>
+  ggplot(aes(x = max_concurrency)) +
+  geom_histogram() +
+  facet_wrap(~ region)
+
+concurrency_central <- concurrency_results |>
+  filter(region == "2 Central") |>
+  mutate(overburdened = if_else(max_concurrency > 2, 1, 0))
+
+mean(concurrency_central$overburdened)
+```
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Ensure max_concurrency is an integer category
+counts <- concurrency_results %>%
+  mutate(max_concurrency = as.integer(max_concurrency)) %>%
+  count(region, max_concurrency, name = "n") %>%
+  # fill in missing combos so you always get 3 bars per x (even if some are 0)
+  complete(region, max_concurrency = full_seq(range(max_concurrency, na.rm = TRUE), 1), fill = list(n = 0))
+
+ggplot(counts, aes(x = factor(max_concurrency), y = n, fill = region)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.75) +
+  labs(
+    title = "Counts of Max Concurrency by Region",
+    x = "Max concurrency (per hour)",
+    y = "Number of hours"
+  ) +
+  theme_minimal()
+
+```
+
+
+```{r}
+library(dplyr)
+library(lubridate)
+
+PAD_MIN <- 15
+
+ems_padded <- ems_clean %>%
+  mutate(
+    start_pad = dispatch_time - minutes(PAD_MIN),
+    end_pad   = available_time + minutes(PAD_MIN)
+  )
+
+north_calls <- ems_padded %>%
+  filter(grepl("North", region, ignore.case = TRUE)) %>%
+  mutate(north_call_id = row_number())
+
+central_calls <- ems_padded %>%
+  filter(grepl("Central", region, ignore.case = TRUE)) %>%
+  mutate(central_call_id = row_number())
+
+# Cartesian join + overlap filter
+overlaps_nc <- inner_join(
+  north_calls %>% select(north_call_id, start_pad, end_pad),
+  central_calls %>% select(central_call_id, start_pad, end_pad),
+  by = character()
+) %>%
+  filter(start_pad.x < end_pad.y & end_pad.x > start_pad.y)
+
+north_overlap_counts <- overlaps_nc %>%
+  group_by(north_call_id) %>%
+  summarise(central_overlap_count = n_distinct(central_call_id), .groups = "drop")
+
+north_with_counts <- north_calls %>%
+  left_join(north_overlap_counts, by = "north_call_id") %>%
+  mutate(central_overlap_count = replace_na(central_overlap_count, 0L))
+
+ggplot(north_with_counts, aes(x = central_overlap_count)) +
+  geom_histogram()
+
+nrow(filter(north_with_counts, central_overlap_count > 2)) / nrow(north_with_counts)
+```
+
+```{r}
+ggplot(north_with_counts, aes(x = central_overlap_count)) +
+  geom_histogram()
+```
+
