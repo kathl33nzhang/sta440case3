@@ -431,7 +431,6 @@ ggplot(ems, aes(REF.GRID, response_time_min, fill = REF.GRID)) +
   labs(x = "", y = "Response time (min)", title = "Observed response times by region") +
   theme(legend.position = "none")
 ```
-<<<<<<< HEAD
 Near vs Far North Station
 
 ```{r}
@@ -539,6 +538,3 @@ ggplot(north_value, aes(saving_min)) +
   theme_minimal()
 
 ```
-
-=======
->>>>>>> fefef11eaa3ca72ac9f8e00b2b80322b6017abe7
