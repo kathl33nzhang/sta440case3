@@ -203,6 +203,28 @@ sim_results %>%
     .groups = "drop"
   )
 
+# ---- put this immediately after sim_results is created in CHUNK 4 ----
+
+# Coerce to plain numeric seconds and recompute totals
+sim_results <- sim_results %>%
+  mutate(
+    wait_secs           = as.numeric(wait_secs),
+    travel_secs         = as.numeric(travel_secs),
+    service_secs        = as.numeric(service_secs),
+    total_response_secs = as.numeric(wait_secs + travel_secs),
+    total_time_secs     = as.numeric(total_response_secs + service_secs)
+  )
+
+# Optional quick diag
+# str(sim_results$total_response_secs); summary(sim_results$total_response_secs)
+
+# Keep only finite, plausible response times (0–2 hours)
+sim_results_clean <- sim_results %>%
+  filter(is.finite(total_response_secs),
+         total_response_secs >= 0,
+         total_response_secs <= 2*60*60)
+
+
 ```
 
 ```{r}
@@ -211,16 +233,16 @@ library(tidyverse)
 library(scales)
 
 # Response-time summaries (travel + wait)
-summ_tbl <- sim_results %>%
+summ_tbl <- sim_results_clean %>%
   group_by(scenario) %>%
   summarise(
     n               = n(),
-    mean_resp_s     = mean(total_response_secs, na.rm = TRUE),
-    median_resp_s   = median(total_response_secs, na.rm = TRUE),
-    p90_resp_s      = quantile(total_response_secs, 0.90, na.rm = TRUE),
-    p95_resp_s      = quantile(total_response_secs, 0.95, na.rm = TRUE),
-    pct_under_8min  = mean(total_response_secs <= 8*60, na.rm = TRUE),
-    pct_under_10min = mean(total_response_secs <= 10*60, na.rm = TRUE),
+    mean_resp_s     = mean(total_response_secs),
+    median_resp_s   = median(total_response_secs),
+    p90_resp_s      = quantile(total_response_secs, 0.90),
+    p95_resp_s      = quantile(total_response_secs, 0.95),
+    pct_under_8min  = mean(total_response_secs <= 8*60),
+    pct_under_10min = mean(total_response_secs <= 10*60),
     .groups = "drop"
   ) %>%
   arrange(mean_resp_s)
@@ -228,9 +250,16 @@ summ_tbl <- sim_results %>%
 print(summ_tbl)
 
 # Boxplot of response times by scenario (cap extreme tails for readability)
-plot_df <- sim_results %>%
-  filter(!is.na(total_response_secs), total_response_secs <= quantile(total_response_secs, 0.99, na.rm = TRUE)) %>%
+plot_df <- sim_results_clean %>%
   mutate(scenario = factor(scenario, levels = sort(unique(scenario))))
+
+ggplot(plot_df, aes(x = scenario, y = total_response_secs)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  scale_y_continuous("Total Response (s)",
+                     labels = scales::label_number(accuracy = 1)) +
+  labs(title = "Response Time Distributions by Scenario") +
+  theme_minimal()
+
 
 # Boxplot
 ggplot(plot_df, aes(x = scenario, y = total_response_secs)) +
