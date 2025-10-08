@@ -1,0 +1,316 @@
+**libraries**
+
+```{r}
+# ---- CHUNK 1 (revised): Setup & Normalize using UA travel times only ----
+library(tidyverse)
+library(lubridate)
+
+# Load the .RData (whatever object name is inside)
+objs_loaded <- load("emsData.RData")
+ems <- if ("ems" %in% objs_loaded) get("ems") else if ("x" %in% objs_loaded) get("x") else stop("No 'ems' or 'x' in emsData.RData")
+
+# Helper: safely coerce to POSIXct if not already
+to_posix <- function(x) if (inherits(x, "POSIXt")) x else ymd_hms(x, quiet = TRUE)
+
+# Ensure UA columns exist (create as NA if missing so mutate won’t error)
+ua_needed <- c("eTT.UA.Ce", "eTT.UA.So", "eTT.UA.NN", "eTT.UA.FN")
+for (nm in ua_needed) if (!nm %in% names(ems)) ems[[nm]] <- NA_real_
+
+# Build standardized incident table
+ems_std <- ems %>%
+  mutate(
+    dispatch_at = to_posix(DT.DISP),
+    clear_at    = to_posix(DT.AVAILABLE),
+    service_secs = as.numeric(difftime(clear_at, dispatch_at, units = "secs")),
+
+    # UA travel times only (seconds); keep as numeric
+    tt_central    = eTT.UA.Ce,
+    tt_south      = eTT.UA.So,
+    tt_near_north = eTT.UA.NN,
+    tt_far_north  = eTT.UA.FN
+  ) %>%
+  arrange(dispatch_at) %>%
+  group_by(dispatch_at) %>%
+  slice(1) %>%                      # one row per incident (first record at that dispatch time)
+  ungroup() %>%
+  mutate(incident_id = row_number()) %>%
+  select(
+    incident_id, dispatch_at, clear_at, service_secs,
+    REF.GRID, DISPATCH.PRIORITY.NAME, BASE.NAME, VEH.GRID,
+    tt_central, tt_south, tt_near_north, tt_far_north
+  )
+
+# Light checks so we know what we have
+message("Rows: ", nrow(ems_std))
+message("Missing dispatch_at: ", sum(is.na(ems_std$dispatch_at)))
+message("Missing clear_at: ", sum(is.na(ems_std$clear_at)))
+message("Non-positive service_secs: ", sum(!is.na(ems_std$service_secs) & ems_std$service_secs <= 0))
+summary(select(ems_std, tt_central, tt_south, tt_near_north, tt_far_north))
+
+```
+
+```{r}
+scenarios <- tibble::tribble(
+  ~scenario, ~units,
+  "S1", list(c(Central=3, South=1)),
+  "S2", list(c(Central=3, NearNorth=1)),
+  "S3", list(c(Central=3, FarNorth=1)),
+  "S4", list(c(Central=2, NearNorth=1, South=1)),
+  "S5", list(c(Central=2, FarNorth=1, South=1))
+)
+
+station_tt_map <- c(
+  Central   = "tt_central",
+  NearNorth = "tt_near_north",
+  FarNorth  = "tt_far_north",
+  South     = "tt_south"
+)
+```
+
+```{r}
+# ---- PATCHED simulate_scenario(): NA/edge-case safe ----
+tt_col_for <- function(station) {
+  switch(station,
+    "Central"   = "tt_central",
+    "South"     = "tt_south",
+    "NearNorth" = "tt_near_north",
+    "FarNorth"  = "tt_far_north",
+    stop("Unknown station: ", station)
+  )
+}
+
+simulate_scenario <- function(incidents, units_cfg_named_vec) {
+  counts <- as.integer(unlist(units_cfg_named_vec))
+  if (length(counts) == 0 || sum(counts, na.rm = TRUE) <= 0) {
+    stop("Scenario has zero units.")
+  }
+  stations <- names(counts)
+  unit_station <- rep(stations, times = counts)
+
+  # Build per-unit table
+  t0 <- suppressWarnings(min(incidents$dispatch_at, na.rm = TRUE))
+  if (!is.finite(as.numeric(t0))) stop("All dispatch_at are NA after filtering.")
+  units <- tibble::tibble(
+    station   = unit_station,
+    unit_id   = paste0(unit_station, "_", ave(seq_along(unit_station), unit_station, FUN = seq_along)),
+    next_free = t0 - lubridate::seconds(1)
+  )
+
+  out <- vector("list", nrow(incidents))
+
+  for (i in seq_len(nrow(incidents))) {
+    call_t <- incidents$dispatch_at[i]
+    if (is.na(call_t)) next
+    svc <- incidents$service_secs[i]
+    if (is.na(svc) || svc < 0) svc <- 0
+
+    # per-unit travel times for THIS incident (NA -> Inf)
+    tt_cols <- vapply(units$station, tt_col_for, character(1))
+    tt_vals <- vapply(seq_along(tt_cols), function(k) {
+      col <- tt_cols[k]
+      val <- incidents[[col]][i]
+      if (is.null(val) || is.na(val)) Inf else as.numeric(val)
+    }, numeric(1))
+
+    # availability (NA -> FALSE)
+    available <- units$next_free <= call_t
+    available[is.na(available)] <- FALSE
+
+    if (!any(available)) {
+      # pick the earliest-free unit; NA next_free -> Inf so we can pick something
+      nf <- as.numeric(units$next_free)
+      nf[is.na(nf)] <- Inf
+      chosen <- which.min(nf)
+      if (length(chosen) == 0 || !is.finite(nf[chosen])) chosen <- 1
+
+      wait_s <- max(0, as.numeric(difftime(units$next_free[chosen], call_t, units = "secs")))
+      travel_s <- if (is.finite(tt_vals[chosen])) tt_vals[chosen] else 0
+      depart_time <- units$next_free[chosen]
+    } else {
+      idx <- which(available)
+      finite_tt <- tt_vals[idx]
+      if (!any(is.finite(finite_tt))) {
+        chosen <- idx[1]
+        travel_s <- 0
+      } else {
+        chosen <- idx[which.min(finite_tt)]
+        travel_s <- tt_vals[chosen]
+      }
+      wait_s <- 0
+      depart_time <- call_t
+    }
+
+    units$next_free[chosen] <- depart_time + lubridate::seconds(wait_s + travel_s + svc)
+
+    out[[i]] <- tibble::tibble(
+      incident_id      = incidents$incident_id[i],
+      assigned_station = units$station[chosen],
+      assigned_unit    = units$unit_id[chosen],
+      wait_secs        = wait_s,
+      travel_secs      = travel_s,
+      total_response_secs = wait_s + travel_s
+    )
+  }
+
+  dplyr::bind_rows(out)
+}
+
+
+```
+
+```{r}
+
+# ---- CHUNK 4: Define scenarios and run them ----
+
+# Use the standardized table from Chunk 1
+# replace your current `inc <- ...` with this stricter version
+inc <- ems_std %>%
+  filter(!is.na(dispatch_at),
+         !is.na(clear_at),
+         !is.na(service_secs),
+         service_secs >= 0) %>%
+  filter(rowSums(!is.na(select(., tt_central, tt_south, tt_near_north, tt_far_north))) >= 1) %>%
+  select(incident_id, dispatch_at, service_secs,
+         tt_central, tt_south, tt_near_north, tt_far_north) %>%
+  arrange(dispatch_at)
+
+
+# Scenarios stored as named numeric vectors (not lists of lists)
+scenarios <- tibble::tribble(
+  ~scenario, ~units_cfg,
+  "S1", c(Central = 3, South = 1),
+  "S2", c(Central = 3, NearNorth = 1),
+  "S3", c(Central = 3, FarNorth = 1),
+  "S4", c(Central = 2, NearNorth = 1, South = 1),
+  "S5", c(Central = 2, FarNorth  = 1, South = 1)
+)
+
+# Run each scenario
+sim_results <- scenarios %>%
+  mutate(sim = purrr::map(units_cfg, ~ simulate_scenario(inc, .x))) %>%
+  select(scenario, sim) %>%
+  tidyr::unnest(sim) %>%
+  left_join(ems_std %>% select(incident_id, service_secs), by = "incident_id") %>%
+  mutate(total_time_secs = total_response_secs + service_secs)
+
+# Quick sanity summary
+sim_results %>%
+  group_by(scenario) %>%
+  summarise(
+    mean_resp = mean(total_response_secs, na.rm = TRUE),
+    p90_resp  = quantile(total_response_secs, 0.9, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  )
+
+```
+
+```{r}
+# ---- CHUNK 5: Summaries & Plots ----
+library(tidyverse)
+library(scales)
+
+# Response-time summaries (travel + wait)
+summ_tbl <- sim_results %>%
+  group_by(scenario) %>%
+  summarise(
+    n               = n(),
+    mean_resp_s     = mean(total_response_secs, na.rm = TRUE),
+    median_resp_s   = median(total_response_secs, na.rm = TRUE),
+    p90_resp_s      = quantile(total_response_secs, 0.90, na.rm = TRUE),
+    p95_resp_s      = quantile(total_response_secs, 0.95, na.rm = TRUE),
+    pct_under_8min  = mean(total_response_secs <= 8*60, na.rm = TRUE),
+    pct_under_10min = mean(total_response_secs <= 10*60, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(mean_resp_s)
+
+print(summ_tbl)
+
+# Boxplot of response times by scenario (cap extreme tails for readability)
+plot_df <- sim_results %>%
+  filter(!is.na(total_response_secs), total_response_secs <= quantile(total_response_secs, 0.99, na.rm = TRUE)) %>%
+  mutate(scenario = factor(scenario, levels = sort(unique(scenario))))
+
+# Boxplot
+ggplot(plot_df, aes(x = scenario, y = total_response_secs)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  scale_y_continuous("Total Response (s)",
+                     labels = scales::label_number(accuracy = 1)) +
+  labs(title = "Response Time Distributions by Scenario") +
+  theme_minimal()
+
+# ECDF
+ggplot(sim_results, aes(x = total_response_secs, color = scenario)) +
+  stat_ecdf(geom = "step") +
+  scale_x_continuous("Total Response (s)",
+                     labels = scales::label_number(accuracy = 1)) +
+  labs(title = "ECDF of Total Response Times") +
+  theme_minimal()
+
+
+```
+
+```{r}
+# ---- CHUNK 7 (robust): Diagnostics ----
+
+safe_re <- function(mod, grp = "incident_id") {
+  if (!inherits(mod, "merMod")) return(numeric(0))
+  re_list <- try(lme4::ranef(mod, condVar = FALSE), silent = TRUE)
+  if (inherits(re_list, "try-error")) return(numeric(0))
+  if (!grp %in% names(re_list)) return(numeric(0))
+  vec <- suppressWarnings(as.numeric(re_list[[grp]][,"(Intercept)"]))
+  vec[is.finite(vec)]
+}
+
+# ----- Seconds model -----
+if (exists("m") && inherits(m, "merMod")) {
+  par(mfrow = c(1, 2), las = 1)
+
+  # Residuals vs Fitted
+  plot(fitted(m), resid(m),
+       xlab = "Fitted (s)", ylab = "Residuals (s)",
+       main = "Residuals vs Fitted (seconds)")
+  abline(h = 0, col = "gray60")
+
+  # QQ plot residuals
+  qqnorm(resid(m), main = "QQ Plot Residuals (seconds)")
+  qqline(resid(m), col = "gray60")
+
+  # Random effects QQ (only if available)
+  re_int <- safe_re(m, "incident_id")
+  if (length(re_int) > 1) {
+    par(mfrow = c(1, 1), las = 1)
+    qqnorm(re_int, main = "QQ Plot Random Intercepts (seconds)")
+    qqline(re_int, col = "gray60")
+  } else {
+    message("Skipped random-effects QQ (seconds): no finite random effects to plot.")
+  }
+}
+
+# ----- Log-seconds model -----
+if (exists("m_log") && inherits(m_log, "merMod")) {
+  par(mfrow = c(1, 2), las = 1)
+
+  # Residuals vs Fitted
+  plot(fitted(m_log), resid(m_log),
+       xlab = "Fitted log(s)", ylab = "Residuals",
+       main = "Residuals vs Fitted (log seconds)")
+  abline(h = 0, col = "gray60")
+
+  # QQ plot residuals
+  qqnorm(resid(m_log), main = "QQ Plot Residuals (log seconds)")
+  qqline(resid(m_log), col = "gray60")
+
+  # Random effects QQ (only if available)
+  re_int_log <- safe_re(m_log, "incident_id")
+  if (length(re_int_log) > 1) {
+    par(mfrow = c(1, 1), las = 1)
+    qqnorm(re_int_log, main = "QQ Plot Random Intercepts (log)")
+    qqline(re_int_log, col = "gray60")
+  } else {
+    message("Skipped random-effects QQ (log): no finite random effects to plot.")
+  }
+}
+
+```
