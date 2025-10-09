@@ -310,19 +310,21 @@ ggplot(plot_df, aes(x = scenario, y = total_response_secs)) +
   theme_minimal()
 
 
-# ---- Side boxplot (response times in minutes, simple aesthetic) ----
-
+# ---- Side boxplot (response times in minutes) ----
 plot_df <- sim_results_clean %>%
   mutate(
     scenario = factor(scenario, levels = sort(unique(scenario))),
     total_response_min = total_response_secs / 60
-  )
+  ) %>%
+  dplyr::group_by(scenario) %>%
+  dplyr::filter(total_response_min != max(total_response_min, na.rm = TRUE)) %>%
+  dplyr::ungroup()
 
 ggplot(plot_df, aes(y = scenario, x = total_response_min)) +
   geom_boxplot(outlier.alpha = 0.25, width = 0.6, color = "gray30", fill = "white") +
   scale_x_continuous(
     "Total Response Time (minutes)",
-    breaks = seq(0, 40, 2),
+    breaks = seq(0, 30, 2),
     labels = function(x) format(x, nsmall = 0, trim = TRUE)
   ) +
   labs(
@@ -747,6 +749,86 @@ if (exists("g_glmm") && inherits(g_glmm, "merMod")) {
 
   # AIC
   cat(sprintf("AIC [GLMM]: %.1f\n", AIC(g_glmm)))
+}
+```
+
+```{r}
+# ---- CHUNK 8: Model Comparison & Selection ----
+
+summarize_model <- function(mod, name, family, link, has_random = FALSE) {
+  ll  <- tryCatch(as.numeric(logLik(mod)), error = function(e) NA_real_)
+  aic <- tryCatch(AIC(mod),                 error = function(e) NA_real_)
+  tibble::tibble(
+    model = name,
+    family = family,
+    link = link,
+    random_effects = has_random,
+    logLik = ll,
+    AIC = aic
+  )
+}
+
+cmp_tbl <- dplyr::bind_rows(
+  if (exists("g_glm"))  summarize_model(g_glm,  "Gamma GLM",  "Gamma",  "log", FALSE),
+  if (exists("g_glmm")) summarize_model(g_glmm, "Gamma GLMM", "Gamma",  "log", TRUE),
+  if (exists("m8"))     summarize_model(m8,     "Logistic GLMM (≤8)",  "Binomial", "logit", TRUE),
+  if (exists("m10"))    summarize_model(m10,    "Logistic GLMM (≤10)", "Binomial", "logit", TRUE),
+  if (exists("fe8"))    summarize_model(fe8,    "Logistic FE (≤8)",    "Binomial", "logit", FALSE),
+  if (exists("fe10"))   summarize_model(fe10,   "Logistic FE (≤10)",   "Binomial", "logit", FALSE)
+) %>% 
+  dplyr::arrange(family, dplyr::desc(random_effects), AIC)
+
+cat("\n=== Model comparison (likelihood-based) ===\n")
+print(cmp_tbl)
+
+# Optional: pseudo-R2 for logistic mixed models, if MuMIn is available
+if (requireNamespace("MuMIn", quietly = TRUE)) {
+  library(MuMIn)
+  if (exists("m8")) {
+    r2_8 <- MuMIn::r.squaredGLMM(m8)
+    cat("\nLogistic GLMM (≤8) R² (marginal/conditional):\n")
+    print(r2_8)
+  }
+  if (exists("m10")) {
+    r2_10 <- MuMIn::r.squaredGLMM(m10)
+    cat("\nLogistic GLMM (≤10) R² (marginal/conditional):\n")
+    print(r2_10)
+  }
+}
+
+# Optional: simple calibration / Brier score for logistic models
+brier <- function(obs, p) mean((p - obs)^2)
+
+if (exists("m8")) {
+  p8 <- as.numeric(predict(m8, type = "response"))
+  b8 <- brier(logit_df$ontime_8, p8)
+  cat(sprintf("\nBrier score (≤8, GLMM): %.4f\n", b8))
+}
+if (exists("m10")) {
+  p10 <- as.numeric(predict(m10, type = "response"))
+  b10 <- brier(logit_df$ontime_10, p10)
+  cat(sprintf("Brier score (≤10, GLMM): %.4f\n", b10))
+}
+
+# --- Final selection logic (prints a short recommendation) ---
+cat("\n=== Recommendation ===\n")
+if (exists("m8")) {
+  cat("* Primary: Logistic GLMM (≤8 minutes) — aligns with service-level target; handles repeated incidents via random intercepts.\n")
+  if (exists("g_glmm") && exists("g_glm")) {
+    if (is.finite(AIC(g_glmm)) && is.finite(AIC(g_glm)) && AIC(g_glmm) < AIC(g_glm)) {
+      cat("* Secondary (robustness): Gamma GLMM (log link) — preferred over Gamma GLM by AIC; report as continuous-time corroboration.\n")
+    } else {
+      cat("* Secondary (robustness): Gamma GLM/GLMM — include continuous-time results for context; logistic remains decision model.\n")
+    }
+  }
+} else if (exists("fe8")) {
+  cat("* Primary: Logistic FE (≤8 minutes) — used because lme4 was unavailable; still aligns with target and controls for incident.\n")
+} else if (exists("g_glmm")) {
+  cat("* Primary: Gamma GLMM (log link) — if policy target must be continuous seconds rather than a threshold.\n")
+} else if (exists("g_glm")) {
+  cat("* Primary: Gamma GLM (log link) — baseline continuous-time model when mixed-effects not available.\n")
+} else {
+  cat("* No fitted models found to recommend.\n")
 }
 ```
 
