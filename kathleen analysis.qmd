@@ -310,13 +310,36 @@ ggplot(plot_df, aes(x = scenario, y = total_response_secs)) +
   theme_minimal()
 
 
-# Boxplot
-ggplot(plot_df, aes(x = scenario, y = total_response_secs)) +
-  geom_boxplot(outlier.alpha = 0.2) +
-  scale_y_continuous("Total Response (s)",
-                     labels = scales::label_number(accuracy = 1)) +
-  labs(title = "Response Time Distributions by Scenario") +
-  theme_minimal()
+# ---- Side boxplot (response times in minutes, simple aesthetic) ----
+
+plot_df <- sim_results_clean %>%
+  mutate(
+    scenario = factor(scenario, levels = sort(unique(scenario))),
+    total_response_min = total_response_secs / 60
+  )
+
+ggplot(plot_df, aes(y = scenario, x = total_response_min)) +
+  geom_boxplot(outlier.alpha = 0.25, width = 0.6, color = "gray30", fill = "white") +
+  scale_x_continuous(
+    "Total Response Time (minutes)",
+    breaks = seq(0, 40, 2),
+    labels = function(x) format(x, nsmall = 0, trim = TRUE)
+  ) +
+  labs(
+    title = "Response Time Distributions by Scenario",
+    subtitle = "Distribution of total (travel + wait) response time per scenario",
+    y = "Scenario"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank(),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    axis.title.x = element_text(face = "bold", margin = margin(t = 8)),
+    axis.title.y = element_text(face = "bold", margin = margin(r = 8))
+  )
 
 
 # Cumulative Line Plot
