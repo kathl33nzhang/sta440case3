@@ -391,7 +391,7 @@ logit_df <- sim_results_clean %>%
   ) %>%
   # keep rows where the binary outcomes are defined
   filter(!is.na(ontime_8), !is.na(ontime_10)) %>%
-  mutate(scenario = relevel(scenario, ref = "S1"))
+  mutate(scenario = relevel(scenario, ref = "S0"))
 
 use_lme4 <- requireNamespace("lme4", quietly = TRUE)
 
@@ -406,9 +406,9 @@ if (use_lme4) {
                data = logit_df, family = binomial(link = "logit"),
                control = glmerControl(optimizer = "bobyqa"))
 
-  cat("\n--- Mixed-effects logistic: ≤ 8 minutes (baseline S1) ---\n")
+  cat("\n--- Mixed-effects logistic: ≤ 8 minutes (baseline SO) ---\n")
   print(summary(m8))
-  cat("\n--- Mixed-effects logistic: ≤ 10 minutes (baseline S1) ---\n")
+  cat("\n--- Mixed-effects logistic: ≤ 10 minutes (baseline SO) ---\n")
   print(summary(m10))
 
   # Odds ratios with 95% CIs
@@ -465,9 +465,9 @@ if (use_lme4) {
   }
   library(fixest)
 
-  fe8  <- feglm(ontime_8  ~ i(scenario, ref = "S1") | incident_id,
+  fe8  <- feglm(ontime_8  ~ i(scenario, ref = "SO") | incident_id,
                 data = logit_df, family = "logit", cluster = ~ incident_id)
-  fe10 <- feglm(ontime_10 ~ i(scenario, ref = "S1") | incident_id,
+  fe10 <- feglm(ontime_10 ~ i(scenario, ref = "SO") | incident_id,
                 data = logit_df, family = "logit", cluster = ~ incident_id)
 
   cat("\n--- Fixed-effects logistic (clustered): ≤ 8 minutes ---\n");  print(summary(fe8))
@@ -478,7 +478,7 @@ if (use_lme4) {
     co <- broom::tidy(mod) %>%
       filter(str_detect(term, "scenario::")) %>%
       mutate(
-        scenario = sub("^i\\(scenario, ref = \"S1\"\\)::", "", term),
+        scenario = sub("^i\\(scenario, ref = \"SO\"\\)::", "", term),
         OR  = exp(estimate),
         LCL = exp(estimate - 1.96*std.error),
         UCL = exp(estimate + 1.96*std.error)
@@ -496,11 +496,11 @@ if (use_lme4) {
   invlogit <- function(x) 1/(1+exp(-x))
   pred_tbl_fixest <- function(mod, title) {
     scs <- levels(logit_df$scenario)
-    # Get baseline intercept (fixest hides fixed effects; use S1 coefficient = 0 reference)
+    # Get baseline intercept (fixest hides fixed effects; use SO coefficient = 0 reference)
     tibble(scenario = scs) %>%
       mutate(
-        beta = ifelse(scenario == "S1", 0,
-                      coef(mod)[paste0("i(scenario, ref = \"S1\")::", scenario)] %||% 0),
+        beta = ifelse(scenario == "SO", 0,
+                      coef(mod)[paste0("i(scenario, ref = \"SO\")::", scenario)] %||% 0),
         # center at average FE (approximate marginal): works for comparisons
         p = invlogit(beta)
       ) %>% select(scenario, p) %>% arrange(scenario) %>% mutate(model = title)
@@ -528,7 +528,7 @@ cat("\n--- Predicted probabilities by scenario ---\n"); print(bind_rows(preds8, 
 logsec_df <- sim_results_clean %>%
   transmute(
     incident_id = factor(incident_id),
-    scenario = relevel(factor(scenario), ref = "S1"),
+    scenario = relevel(factor(scenario), ref = "SO"),
     log_rt = log(pmax(total_response_secs, 1))  # guard against 0
   )
 
@@ -568,7 +568,7 @@ gamma_df <- sim_results_clean %>%
     y = as.numeric(total_response_secs)
   ) %>%
   filter(is.finite(y), y > 0) %>%
-  mutate(scenario = relevel(scenario, ref = "S1"))  # match logistic baseline
+  mutate(scenario = relevel(scenario, ref = "SO"))  # match logistic baseline
 
 stopifnot(nrow(gamma_df) > 0)
 
@@ -578,7 +578,7 @@ g_glm <- glm(y ~ scenario, data = gamma_df, family = Gamma(link = "log"))
 cat("\n=== Gamma GLM (log link) ===\n")
 print(summary(g_glm))
 
-# Exponentiated coefficients (multiplicative effects vs baseline S1)
+# Exponentiated coefficients (multiplicative effects vs baseline SO)
 glm_coef <- coef(summary(g_glm))
 glm_fx <- tibble::tibble(
   term     = rownames(glm_coef),
@@ -589,7 +589,7 @@ glm_fx <- tibble::tibble(
 ) %>%
   mutate(term = ifelse(term == "(Intercept)", "(Intercept)", sub("^scenario", "", term)))
 
-cat("\n--- Multiplicative effects (exp(beta)) vs baseline S1 [GLM] ---\n")
+cat("\n--- Multiplicative effects (exp(beta)) vs baseline SO [GLM] ---\n")
 print(glm_fx)
 
 # Predicted mean response time (seconds) by scenario
@@ -630,7 +630,7 @@ if (requireNamespace("lme4", quietly = TRUE) && "incident_id" %in% names(gamma_d
   ) %>%
   mutate(term = ifelse(term == "(Intercept)", "(Intercept)", sub("^scenario", "", term)))
 
-  cat("\n--- Multiplicative effects (exp(beta)) vs baseline S1 [GLMM] ---\n")
+  cat("\n--- Multiplicative effects (exp(beta)) vs baseline SO [GLMM] ---\n")
   print(glmm_fx)
 
   # Predicted means by scenario (population-level: fixed effects only)
@@ -905,7 +905,7 @@ library(lme4)
 lmm_df <- sim_results_clean %>%
   transmute(
     incident_id = factor(incident_id),
-    scenario    = relevel(factor(scenario), ref = "S1"),
+    scenario    = relevel(factor(scenario), ref = "SO"),
     y_sec       = pmax(as.numeric(total_response_secs), 1)  # guard against 0
   )
 
