@@ -524,7 +524,41 @@ cat("\n--- Predicted probabilities by scenario ---\n"); print(bind_rows(preds8, 
 ```
 
 ```{r}
-# ---- CHUNK 6c: Gamma GLM / GLMM models for continuous response time ----
+# ---- CHUNK 6d: Gaussian LMM on log(seconds) ----
+logsec_df <- sim_results_clean %>%
+  transmute(
+    incident_id = factor(incident_id),
+    scenario = relevel(factor(scenario), ref = "S1"),
+    log_rt = log(pmax(total_response_secs, 1))  # guard against 0
+  )
+
+if (requireNamespace("lme4", quietly = TRUE)) {
+  library(lme4)
+  m_logrt <- lmer(log_rt ~ scenario + (1 | incident_id),
+                  data = logsec_df,
+                  control = lmerControl(optimizer = "bobyqa"))
+
+  cat("\n--- Gaussian LMM on log(seconds) ---\n"); print(summary(m_logrt))
+
+  # Back-transform scenario means to seconds/minutes (fixed-effects, population level)
+  `%||%` <- function(a,b) if (!is.null(a)) a else b
+  fx  <- fixef(m_logrt)
+  scs <- levels(logsec_df$scenario)
+  pred_logrt <- tibble::tibble(scenario = scs) %>%
+    dplyr::mutate(
+      eta      = vapply(scenario, function(s)
+                  fx["(Intercept)"] + (fx[paste0("scenario", s)] %||% 0), numeric(1)),
+      pred_sec = exp(eta),
+      pred_min = pred_sec / 60
+    )
+  cat("\n--- Back-transformed means by scenario (sec & min) ---\n"); print(pred_logrt)
+} else {
+  message("lme4 not available — this chunk requires lme4.")
+}
+```
+
+```{r}
+# ---- CHUNK 6d: Gamma GLM / GLMM models for continuous response time ----
 
 # Build modeling frame
 gamma_df <- sim_results_clean %>%
@@ -680,6 +714,109 @@ if (exists("m_log") && inherits(m_log, "merMod")) {
 ```
 
 ```{r}
+# ---- CHUNK 8c: Diagnostics for Gaussian LMM on log(seconds) ----
+# Expects: m_logrt created by
+#   m_logrt <- lmer(log(y_sec) ~ scenario + (1 | incident_id), data = lmm_df, ...)
+# If it's not found, we stop to avoid silently fitting anything new.
+
+if (!exists("m_logrt") || !inherits(m_logrt, "lmerMod")) {
+  stop("m_logrt not found or not an lmerMod. Fit the log-seconds LMM first.")
+}
+
+library(lme4)
+
+cat("\n=== Diagnostics: Gaussian LMM on log(seconds) ===\n")
+
+## 1) Basic residual objects (conditional = includes random effects)
+fitted_cond <- fitted(m_logrt)                     # on log scale
+resid_raw   <- resid(m_logrt)                      # response residuals (log scale)
+sigma_hat   <- sigma(m_logrt)                      # residual SD
+resid_std   <- resid_raw / sigma_hat               # approx. standardized (Pearson) residuals
+
+## 2) Plots on the log scale (homoscedasticity & normality)
+op <- par(mfrow = c(1, 2), las = 1)
+
+# Residuals vs fitted (look for no pattern, constant spread)
+plot(fitted_cond, resid_raw,
+     xlab = "Fitted values (log seconds)",
+     ylab = "Residuals (log seconds)",
+     main = "Residuals vs Fitted (log scale)")
+abline(h = 0, col = "gray60")
+
+# QQ-plot of residuals (should be ~ straight line)
+qqnorm(resid_raw, main = "QQ-plot: residuals (log scale)")
+qqline(resid_raw, col = "gray60")
+par(op)
+
+## 3) Scale-location (variance stability): sqrt(|std resid|) vs fitted
+plot(fitted_cond, sqrt(abs(resid_std)),
+     xlab = "Fitted values (log seconds)",
+     ylab = "sqrt(|std residual|)",
+     main = "Scale-Location (log scale)")
+lines(lowess(fitted_cond, sqrt(abs(resid_std))), col = "gray40", lwd = 2)
+
+## 4) Random-effects diagnostics: QQ for incident intercepts
+re_list <- ranef(m_logrt, condVar = FALSE)
+if ("incident_id" %in% names(re_list)) {
+  u0 <- as.numeric(re_list$incident_id[,"(Intercept)"])
+  if (sum(is.finite(u0)) > 3) {
+    qqnorm(u0, main = "QQ-plot: random intercepts (incident)")
+    qqline(u0, col = "gray60")
+  } else {
+    message("Not enough finite random-effect estimates for QQ-plot.")
+  }
+}
+
+## 5) Quick heteroskedasticity screen across scenarios (log scale)
+# Boxplot of absolute residuals by scenario
+if (exists("lmm_df")) {
+  diag_df <- data.frame(
+    scenario = lmm_df$scenario,
+    abs_res  = abs(resid_raw)
+  )
+  boxplot(abs_res ~ scenario, data = diag_df,
+          xlab = "Scenario", ylab = "|Residual| (log scale)",
+          main = "Abs Residuals by Scenario (log scale)")
+}
+
+## 6) Variance components & ICC
+vc <- as.data.frame(VarCorr(m_logrt))
+# Rows typically: 1) random intercept variance, 2) residual variance
+tau2   <- vc$vcov[vc$grp == "incident_id"]  # between-incident variance
+sigma2 <- vc$vcov[vc$grp == "Residual"]     # within-incident variance
+ICC    <- tau2 / (tau2 + sigma2)
+cat(sprintf("\nVariance components (log scale): tau^2=%.4f, sigma^2=%.4f; ICC=%.3f\n",
+            tau2, sigma2, ICC))
+
+## 7) Optional: DHARMa simulation residuals (works for LMMs, but optional)
+if (requireNamespace("DHARMa", quietly = TRUE)) {
+  library(DHARMa)
+  cat("\nSimulating DHARMa residuals (this may take a moment)...\n")
+  simres <- simulateResiduals(fittedModel = m_logrt, n = 1000, plot = FALSE)
+  plot(simres)  # uniformity, dispersion, outliers
+} else {
+  message("Package 'DHARMa' not installed: skipping simulation-based residual checks.")
+}
+
+## 8) Optional: Influence diagnostics (cluster-level) if influence.ME is available
+if (requireNamespace("influence.ME", quietly = TRUE)) {
+  library(influence.ME)
+  infl <- influence(m_logrt, group = "incident_id")
+  cooks <- cooks.distance(infl)
+  plot(cooks, type = "h", main = "Cook's distance by incident",
+       xlab = "Incident index", ylab = "Cook's D")
+  # Quick flag for potentially influential incidents (rule-of-thumb)
+  flag <- which(cooks > (4 / length(cooks)))
+  if (length(flag)) {
+    cat("\nPotentially influential incidents (Cook's D > 4/n):\n")
+    print(flag)
+  }
+} else {
+  message("Package 'influence.ME' not installed: skipping influence diagnostics.")
+}
+```
+
+```{r}
 # ---- CHUNK 7c: Diagnostics for Gamma models (GLM and GLMM) ----
 
 # GLM diagnostics
@@ -753,7 +890,156 @@ if (exists("g_glmm") && inherits(g_glmm, "merMod")) {
 ```
 
 ```{r}
-# ---- CHUNK 8: Model Comparison & Selection ----
+# ---- CHUNK 8b: Compare Gaussian LMM on raw seconds vs. log(seconds) ----
+# Goal: fair comparison on the ORIGINAL seconds scale via grouped CV + smearing
+# Notes:
+# - We avoid AIC comparisons across different response transforms.
+# - We use incident-level folds; predictions are population-level (re.form = NA).
+
+if (!requireNamespace("lme4", quietly = TRUE)) {
+  stop("This chunk requires lme4. Install it first.")
+}
+library(lme4)
+
+# 1) Build modeling frame (shared)
+lmm_df <- sim_results_clean %>%
+  transmute(
+    incident_id = factor(incident_id),
+    scenario    = relevel(factor(scenario), ref = "S1"),
+    y_sec       = pmax(as.numeric(total_response_secs), 1)  # guard against 0
+  )
+
+# 2) Fit (or reuse) the two LMMs
+#    - Raw seconds
+if (!exists("m_rawrt")) {
+  m_rawrt <- lmer(y_sec ~ scenario + (1 | incident_id),
+                  data = lmm_df,
+                  control = lmerControl(optimizer = "bobyqa"))
+}
+
+#    - Log seconds
+if (!exists("m_logrt")) {
+  m_logrt <- lmer(log(y_sec) ~ scenario + (1 | incident_id),
+                  data = lmm_df,
+                  control = lmerControl(optimizer = "bobyqa"))
+}
+
+cat("\n=== Gaussian LMM (raw seconds) ===\n");  print(summary(m_rawrt))
+cat("\n=== Gaussian LMM (log seconds) ===\n");  print(summary(m_logrt))
+
+# 3) Refit with ML (optional diagnostics only; do NOT use for final estimates)
+m_rawrt_ml <- update(m_rawrt, REML = FALSE)
+m_logrt_ml <- update(m_logrt, REML = FALSE)
+
+cat(sprintf("\nAIC [raw secs, ML]: %.1f | AIC [log secs, ML]: %.1f\n",
+            AIC(m_rawrt_ml), AIC(m_logrt_ml)))
+
+# 4) Grouped 5-fold CV (by incident) on ORIGINAL seconds scale
+set.seed(123)
+k <- 5
+ids <- levels(lmm_df$incident_id)
+fold_id <- sample(rep_len(1:k, length(ids)))
+names(fold_id) <- ids
+
+rmse <- function(y, yhat) sqrt(mean((y - yhat)^2))
+mae  <- function(y, yhat) mean(abs(y - yhat))
+
+cv_rows <- vector("list", k)
+
+for (f in 1:k) {
+  test_ids  <- ids[fold_id == f]
+  train_ids <- ids[fold_id != f]
+
+  train <- lmm_df %>% dplyr::filter(incident_id %in% train_ids)
+  test  <- lmm_df %>% dplyr::filter(incident_id %in% test_ids)
+
+  # Fit on train
+  m_raw_tr <- lmer(y_sec ~ scenario + (1 | incident_id),
+                   data = train, control = lmerControl(optimizer = "bobyqa"))
+  m_log_tr <- lmer(log(y_sec) ~ scenario + (1 | incident_id),
+                   data = train, control = lmerControl(optimizer = "bobyqa"))
+
+  # Predict population-level (no random effects) on test
+  # Raw model is straightforward:
+  yhat_raw <- as.numeric(predict(m_raw_tr, newdata = test, re.form = NA))
+
+  # Log model: predict on log scale, then back-transform with Duan smearing
+  # Smearing factor from TRAIN residuals (population-level)
+  eta_tr_log   <- as.numeric(predict(m_log_tr, newdata = train, re.form = NA))
+  resid_tr_log <- log(train$y_sec) - eta_tr_log
+  smear        <- mean(exp(resid_tr_log))  # Duan (1983)
+
+  eta_te_log <- as.numeric(predict(m_log_tr, newdata = test, re.form = NA))
+  yhat_log   <- exp(eta_te_log) * smear
+
+  cv_rows[[f]] <- tibble::tibble(
+    fold = f,
+    y_sec = test$y_sec,
+    yhat_raw = yhat_raw,
+    yhat_log = yhat_log
+  )
+}
+
+cv_pred <- dplyr::bind_rows(cv_rows)
+
+cv_summary <- tibble::tibble(
+  model = c("LMM raw seconds", "LMM log seconds (smeared)"),
+  RMSE  = c(rmse(cv_pred$y_sec, cv_pred$yhat_raw),
+            rmse(cv_pred$y_sec, cv_pred$yhat_log)),
+  MAE   = c(mae(cv_pred$y_sec, cv_pred$yhat_raw),
+            mae(cv_pred$y_sec, cv_pred$yhat_log))
+)
+
+cat("\n=== 5-fold CV on original seconds ===\n")
+print(cv_summary)
+
+# 5) Scenario-level marginal means (population-level) on ORIGINAL seconds
+#    Raw model: direct prediction by scenario
+scs <- levels(lmm_df$scenario)
+sc_grid <- tibble::tibble(scenario = scs)
+
+pred_raw_scen <- sc_grid %>%
+  mutate(mean_sec = as.numeric(predict(m_rawrt, newdata = ., re.form = NA)),
+         mean_min = mean_sec / 60)
+
+#    Log model: back-transform fixed-effects predictions with global smearing
+eta_log_all <- as.numeric(predict(m_logrt, newdata = lmm_df, re.form = NA))
+res_log_all <- log(lmm_df$y_sec) - eta_log_all
+smear_all   <- mean(exp(res_log_all))
+
+pred_log_scen <- sc_grid %>%
+  mutate(
+    eta      = as.numeric(predict(m_logrt, newdata = ., re.form = NA)),
+    mean_sec = exp(eta) * smear_all,
+    mean_min = mean_sec / 60
+  )
+
+cat("\n=== Scenario-level marginal means (seconds/minutes) ===\n")
+print(dplyr::left_join(
+  pred_raw_scen %>% dplyr::rename(mean_sec_raw = mean_sec, mean_min_raw = mean_min),
+  pred_log_scen %>% dplyr::rename(mean_sec_log = mean_sec, mean_min_log = mean_min),
+  by = "scenario"
+) %>% dplyr::arrange(scenario))
+
+# 6) (Optional) R^2 for mixed models
+if (requireNamespace("MuMIn", quietly = TRUE)) {
+  library(MuMIn)
+  cat("\nR² (marginal/conditional):\n")
+  print(MuMIn::r.squaredGLMM(m_rawrt))
+  print(MuMIn::r.squaredGLMM(m_logrt))
+} else {
+  message("MuMIn not installed: skipping R².")
+}
+
+# ---- Interpretation guide (printed) ----
+cat("\n=== How to decide ===\n")
+cat("* Prefer the model with LOWER CV RMSE/MAE on original seconds.\n")
+cat("* If log model wins and diagnostics look better (homoscedastic residuals on log scale), report log-LMM\n")
+cat("  with Duan-smearing back-transform for means. If raw model wins, report raw-LMM.\n")
+```
+
+```{r}
+# ---- CHUNK 8.b: Model Comparison & Selection ----
 
 summarize_model <- function(mod, name, family, link, has_random = FALSE) {
   ll  <- tryCatch(as.numeric(logLik(mod)), error = function(e) NA_real_)
