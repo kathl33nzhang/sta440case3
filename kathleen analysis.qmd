@@ -51,11 +51,11 @@ summary(select(ems_std, tt_central, tt_south, tt_near_north, tt_far_north))
 ```{r}
 scenarios <- tibble::tribble(
   ~scenario, ~units,
-  "S1", list(c(Central=3, South=1)),
-  "S2", list(c(Central=3, NearNorth=1)),
-  "S3", list(c(Central=3, FarNorth=1)),
-  "S4", list(c(Central=2, NearNorth=1, South=1)),
-  "S5", list(c(Central=2, FarNorth=1, South=1))
+  "S0", list(c(Central=3, South=1)),
+  "S1", list(c(Central=3, NearNorth=1)),
+  "S2", list(c(Central=3, FarNorth=1)),
+  "S3", list(c(Central=2, NearNorth=1, South=1)),
+  "S4", list(c(Central=2, FarNorth=1, South=1))
 )
 
 station_tt_map <- c(
@@ -205,7 +205,7 @@ inc <- ems_for_inc %>%
 
 # Scenarios stored as named numeric vectors (not lists of lists)
 scenarios <- tibble::tibble(
-  scenario  = c("S1","S2","S3","S4","S5"),
+  scenario  = c("S0","S1","S2","S3","S4"),
   units_cfg = list(
     c(Central = 3, South     = 1),
     c(Central = 3, NearNorth = 1),
@@ -317,6 +317,28 @@ ggplot(plot_df, aes(x = scenario, y = total_response_secs)) +
                      labels = scales::label_number(accuracy = 1)) +
   labs(title = "Response Time Distributions by Scenario") +
   theme_minimal()
+
+
+# Cumulative Line Plot
+thresholds <- seq(0, 25*60, by = 60)
+
+curve_df <- tidyr::expand_grid(
+  scenario = unique(sim_results_clean$scenario),
+  threshold = thresholds
+) %>%
+  group_by(scenario, threshold) %>%
+  summarise(
+    pct_under = mean(sim_results_clean$total_response_secs[sim_results_clean$scenario == scenario[1]] <= threshold),
+    .groups = "drop"
+  )
+
+ggplot(curve_df, aes(x = threshold / 60, y = pct_under, color = scenario)) +
+  geom_line(size = 0.5) +
+  scale_y_continuous("Cumulative % of Calls Responded", labels = scales::percent) +
+  scale_x_continuous("Response Time (minutes)", breaks = seq(0, 25, 2)) +
+  labs(title = "Cumulative On-Time Performance by Scenario") +
+  theme_minimal()
+
 
 # ECDF
 ggplot(sim_results_clean, aes(x = total_response_secs, color = scenario)) +
@@ -477,6 +499,98 @@ cat("\n--- Predicted probabilities by scenario ---\n"); print(bind_rows(preds8, 
 ```
 
 ```{r}
+# ---- CHUNK 6c: Gamma GLM / GLMM models for continuous response time ----
+
+# Build modeling frame
+gamma_df <- sim_results_clean %>%
+  transmute(
+    incident_id,
+    scenario = factor(scenario),
+    y = as.numeric(total_response_secs)
+  ) %>%
+  filter(is.finite(y), y > 0) %>%
+  mutate(scenario = relevel(scenario, ref = "S1"))  # match logistic baseline
+
+stopifnot(nrow(gamma_df) > 0)
+
+# 1) Gamma GLM with log link
+g_glm <- glm(y ~ scenario, data = gamma_df, family = Gamma(link = "log"))
+
+cat("\n=== Gamma GLM (log link) ===\n")
+print(summary(g_glm))
+
+# Exponentiated coefficients (multiplicative effects vs baseline S1)
+glm_coef <- coef(summary(g_glm))
+glm_fx <- tibble::tibble(
+  term     = rownames(glm_coef),
+  estimate = exp(glm_coef[, "Estimate"]),
+  LCL      = exp(glm_coef[, "Estimate"] - 1.96 * glm_coef[, "Std. Error"]),
+  UCL      = exp(glm_coef[, "Estimate"] + 1.96 * glm_coef[, "Std. Error"]),
+  p.value  = glm_coef[, "Pr(>|t|)"] %||% glm_coef[, "Pr(>|z|)"]
+) %>%
+  mutate(term = ifelse(term == "(Intercept)", "(Intercept)", sub("^scenario", "", term)))
+
+cat("\n--- Multiplicative effects (exp(beta)) vs baseline S1 [GLM] ---\n")
+print(glm_fx)
+
+# Predicted mean response time (seconds) by scenario
+pred_glm <- gamma_df %>%
+  distinct(scenario) %>%
+  mutate(pred_mean_sec = as.numeric(predict(g_glm, newdata = ., type = "response"))) %>%
+  arrange(scenario)
+
+cat("\n--- Predicted mean response time by scenario (seconds) [GLM] ---\n")
+print(pred_glm)
+
+# 2) Gamma GLMM with random intercept by incident (optional)
+g_glmm <- NULL
+if (requireNamespace("lme4", quietly = TRUE) && "incident_id" %in% names(gamma_df)) {
+  library(lme4)
+  gamma_df <- gamma_df %>% mutate(incident_id = factor(incident_id))
+
+  g_glmm <- suppressWarnings(
+    glmer(
+      y ~ scenario + (1 | incident_id),
+      data = gamma_df,
+      family = Gamma(link = "log"),
+      control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+    )
+  )
+
+  cat("\n=== Gamma GLMM (log link) with random intercept by incident ===\n")
+  print(summary(g_glmm))
+
+  # Fixed effects as multiplicative factors
+  glmm_coef <- coef(summary(g_glmm))
+  glmm_fx <- tibble::tibble(
+    term     = rownames(glmm_coef),
+    estimate = exp(glmm_coef[, "Estimate"]),
+    LCL      = exp(glmm_coef[, "Estimate"] - 1.96 * glmm_coef[, "Std. Error"]),
+    UCL      = exp(glmm_coef[, "Estimate"] + 1.96 * glmm_coef[, "Std. Error"]),
+    p.value  = glmm_coef[, "Pr(>|z|)"]
+  ) %>%
+  mutate(term = ifelse(term == "(Intercept)", "(Intercept)", sub("^scenario", "", term)))
+
+  cat("\n--- Multiplicative effects (exp(beta)) vs baseline S1 [GLMM] ---\n")
+  print(glmm_fx)
+
+  # Predicted means by scenario (population-level: fixed effects only)
+  pred_glmm <- gamma_df %>%
+    distinct(scenario) %>%
+    mutate(pred_mean_sec = as.numeric(predict(g_glmm, newdata = ., type = "response", re.form = NA))) %>%
+    arrange(scenario)
+
+  cat("\n--- Predicted mean response time by scenario (seconds) [GLMM] ---\n")
+  print(pred_glmm)
+} else {
+  cat("\n[lme4 not available or incident_id missing] Skipping Gamma GLMM.\n")
+}
+
+# Helper for `%||%`
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+```
+
+```{r}
 # ---- CHUNK 7 (robust): Diagnostics ----
 
 safe_re <- function(mod, grp = "incident_id") {
@@ -539,3 +653,77 @@ if (exists("m_log") && inherits(m_log, "merMod")) {
 }
 
 ```
+
+```{r}
+# ---- CHUNK 7c: Diagnostics for Gamma models (GLM and GLMM) ----
+
+# GLM diagnostics
+if (exists("g_glm") && inherits(g_glm, "glm")) {
+  cat("\n=== Gamma GLM diagnostics ===\n")
+
+  # Residuals vs fitted (deviance residuals)
+  par(mfrow = c(1, 2), las = 1)
+  plot(
+    fitted(g_glm),
+    resid(g_glm, type = "deviance"),
+    xlab = "Fitted mean (seconds)",
+    ylab = "Deviance residual",
+    main = "GLM: residuals vs fitted"
+  )
+  abline(h = 0, col = "gray60")
+
+  # QQ plot of deviance residuals
+  qqnorm(resid(g_glm, type = "deviance"), main = "GLM: QQ plot (deviance residuals)")
+  qqline(resid(g_glm, type = "deviance"), col = "gray60")
+  par(mfrow = c(1, 1))
+
+  # Dispersion check (Gamma with log link: deviance/df should be ~1)
+  dev <- sum(resid(g_glm, type = "deviance")^2)
+  disp <- dev / df.residual(g_glm)
+  cat(sprintf("Approx. dispersion (deviance / df): %.3f\n", disp))
+
+  # AIC
+  cat(sprintf("AIC [GLM]: %.1f\n", AIC(g_glm)))
+}
+
+# GLMM diagnostics (if fitted)
+if (exists("g_glmm") && inherits(g_glmm, "merMod")) {
+  cat("\n=== Gamma GLMM diagnostics ===\n")
+
+  # Residuals vs fitted (Pearson residuals)
+  par(mfrow = c(1, 2), las = 1)
+  rp <- resid(g_glmm, type = "pearson")
+  plot(
+    fitted(g_glmm),
+    rp,
+    xlab = "Fitted mean (seconds)",
+    ylab = "Pearson residual",
+    main = "GLMM: residuals vs fitted"
+  )
+  abline(h = 0, col = "gray60")
+
+  # QQ plot of Pearson residuals
+  qqnorm(rp, main = "GLMM: QQ plot (Pearson residuals)")
+  qqline(rp, col = "gray60")
+  par(mfrow = c(1, 1))
+
+  # Random-intercept QQ (incident effects)
+  safe_re <- function(mod, grp = "incident_id") {
+    re_list <- try(lme4::ranef(mod, condVar = FALSE), silent = TRUE)
+    if (inherits(re_list, "try-error") || !grp %in% names(re_list)) return(numeric(0))
+    vec <- suppressWarnings(as.numeric(re_list[[grp]][, "(Intercept)"]))
+    vec[is.finite(vec)]
+  }
+  re_int <- safe_re(g_glmm, "incident_id")
+  if (length(re_int) > 1) {
+    qqnorm(re_int, main = "GLMM: QQ plot (random intercepts)")
+    qqline(re_int, col = "gray60")
+  } else {
+    message("Skipped random-effects QQ: no finite random effects to plot.")
+  }
+
+  # AIC
+  cat(sprintf("AIC [GLMM]: %.1f\n", AIC(g_glmm)))
+}
+```
+
