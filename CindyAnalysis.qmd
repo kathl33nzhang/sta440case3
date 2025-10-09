@@ -1,0 +1,297 @@
+---
+title: "CindyAnalysis"
+format: pdf
+---
+
+```{r message=F}
+rm(list = ls())
+library(tidyverse)
+library(nlme)
+library(sf)
+set.seed(440)
+
+load("emsData.RData")
+```
+
+```{r}
+ems <- x |>
+  mutate(
+    actual_travel_time = as.numeric(DT.ARRIVE - DT.DISP)
+  ) |>
+  select(REF.GRID, DISPATCH.PRIORITY.NAME, REF.GPS.LAT, REF.GPS.LON, VEHCGPS, actual_travel_time) |>
+  # split "VEHCGPS" ("36.345, -78.3905") into numeric lat/lon
+  separate(VEHCGPS, into = c("VEH.GPS.LAT", "VEH.GPS.LON"), sep = ",", convert = TRUE) %>%
+  mutate(
+    VEH.GPS.LAT = as.numeric(trimws(VEH.GPS.LAT)),
+    VEH.GPS.LON = as.numeric(trimws(VEH.GPS.LON)),
+    # simple Euclidean distance in degrees
+    distance = sqrt((REF.GPS.LAT - VEH.GPS.LAT)^2 + (REF.GPS.LON - VEH.GPS.LON)^2)
+  ) |>
+  filter(REF.GPS.LON > -78.7)
+```
+
+```{r}
+# Input: your points (already made above)
+ems_pts = st_as_sf(ems, coords = c("REF.GPS.LON","REF.GPS.LAT"), crs = 4326)
+
+# ---- PARAMETERS ----
+max_calls     <- 50      # split if a cell has > max_calls
+cellsize_init <- 0.1    # starting cell size in degrees (your 0.1)
+min_cellsize  <- 0.04   # don't split smaller than this (deg)
+max_depth     <- 4      # safety guard against runaway splitting
+# --------------------
+
+# pull numeric lon/lat (x=lon, y=lat) for fast box tests
+xy <- st_coordinates(ems_pts)
+x  <- xy[,1]
+y  <- xy[,2]
+
+# build initial grid bounds to cover data with ~cellsize_init cells
+bb   <- st_bbox(ems_pts)
+xspan <- as.numeric(bb["xmax"] - bb["xmin"])
+yspan <- as.numeric(bb["ymax"] - bb["ymin"])
+
+nx <- max(1L, ceiling(xspan / cellsize_init))
+ny <- max(1L, ceiling(yspan / cellsize_init))
+
+# snap bbox to a multiple of cellsize_init so we get tidy rectangles
+x0 <- as.numeric(bb["xmin"])
+y0 <- as.numeric(bb["ymin"])
+x1 <- x0 + nx * cellsize_init
+y1 <- y0 + ny * cellsize_init
+
+# initial cells (rectangles) laid out on the snapped lattice
+cells <- list()
+k <- 0L
+for (i in 0:(nx-1L)) {
+  for (j in 0:(ny-1L)) {
+    k <- k + 1L
+    xmin <- x0 + i * cellsize_init
+    xmax <- xmin + cellsize_init
+    ymin <- y0 + j * cellsize_init
+    ymax <- ymin + cellsize_init
+    idx  <- which(x >= xmin & x < xmax & y >= ymin & y < ymax)
+    cells[[k]] <- list(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax,
+                       idx=idx, depth=0L)
+  }
+}
+
+# quadtree refine loop (split any overfull cell)
+leaves <- list()
+queue  <- cells
+cells  <- NULL
+
+while (length(queue) > 0L) {
+  node <- queue[[length(queue)]]; queue[[length(queue)]] <- NULL
+  npts <- length(node$idx)
+  width  <- node$xmax - node$xmin
+  height <- node$ymax - node$ymin
+  too_many   <- npts > max_calls
+  can_split  <- (max(width, height) > min_cellsize) && (node$depth < max_depth)
+
+  if (too_many && can_split) {
+    # split into 4 quadrants at midpoints
+    mx <- (node$xmin + node$xmax) / 2
+    my <- (node$ymin + node$ymax) / 2
+    idx <- node$idx
+
+    # assign points to quadrants by simple comparisons
+    Q1 <- idx[ x[idx] >= node$xmin & x[idx] < mx   & y[idx] >= node$ymin & y[idx] <  my ]  # SW
+    Q2 <- idx[ x[idx] >= mx        & x[idx] < node$xmax & y[idx] >= node$ymin & y[idx] <  my ]  # SE
+    Q3 <- idx[ x[idx] >= node$xmin & x[idx] < mx   & y[idx] >= my         & y[idx] <= node$ymax ]# NW
+    Q4 <- idx[ x[idx] >= mx        & x[idx] <= node$xmax & y[idx] >= my   & y[idx] <= node$ymax ]# NE
+
+    depth2 <- node$depth + 1L
+    queue[[length(queue)+1L]] <- list(xmin=node$xmin, xmax=mx, ymin=node$ymin, ymax=my, idx=Q1, depth=depth2)
+    queue[[length(queue)+1L]] <- list(xmin=mx, xmax=node$xmax, ymin=node$ymin, ymax=my, idx=Q2, depth=depth2)
+    queue[[length(queue)+1L]] <- list(xmin=node$xmin, xmax=mx, ymin=my, ymax=node$ymax, idx=Q3, depth=depth2)
+    queue[[length(queue)+1L]] <- list(xmin=mx, xmax=node$xmax, ymin=my, ymax=node$ymax, idx=Q4, depth=depth2)
+  } else {
+    leaves[[length(leaves)+1L]] <- node
+  }
+}
+
+# turn leaves into sf polygons with counts
+rect_to_poly <- function(xmin,xmax,ymin,ymax){
+  st_polygon(list(matrix(
+    c(xmin,ymin,  xmin,ymax,  xmax,ymax,  xmax,ymin,  xmin,ymin),
+    byrow=TRUE, ncol=2)))
+}
+
+polys <- lapply(leaves, function(nd) rect_to_poly(nd$xmin, nd$xmax, nd$ymin, nd$ymax))
+sectors <- st_sf(
+  sector_id = paste0("Q", seq_along(leaves)),
+  n_calls   = vapply(leaves, function(nd) length(nd$idx), integer(1)),
+  depth     = vapply(leaves, function(nd) nd$depth, integer(1)),
+  geometry  = st_sfc(polys, crs = 4326)
+)
+```
+
+
+```{r}
+# ems_pts: points from REF.GPS (crs = 4326)
+# sectors: quadtree polygons with columns sector_id, n_calls, depth (crs = 4326)
+
+# 1) Join points to sectors (prefer "within"; fall back to nearest for edge cases)
+ems_pts_with_sector <- st_join(ems_pts, sectors["sector_id"], join = st_within)
+
+# Handle points that landed exactly on a boundary (NA after st_within)
+missing <- is.na(ems_pts_with_sector$sector_id)
+if (any(missing)) {
+  nearest_idx <- st_nearest_feature(ems_pts_with_sector[missing, ], sectors)
+  ems_pts_with_sector$sector_id[missing] <- sectors$sector_id[nearest_idx]
+}
+
+# 2) Write sector_id back onto your original ems data.frame (same row order)
+ems$sector_id <- ems_pts_with_sector$sector_id
+
+# (optional) quick check
+table(is.na(ems$sector_id))
+head(ems$sector_id)
+```
+```{r}
+# Assumes:
+#   - sectors: sf polygons with column `sector_id` (crs = 4326)
+#   - ems_pts: sf POINTS from REF.GPS (crs = 4326)
+#   - ems has a column sector_id matching polygons
+
+# Count points per sector (from ems)
+sector_counts <- ems %>%
+  count(sector_id, name = "n_calls")
+
+# Centroids for labeling (point-on-surface ensures label inside polygon)
+label_pts <- st_point_on_surface(sectors) %>%
+  mutate(label = paste0(sector_id, "\n(n=", n_calls, ")"))
+
+north_sectors <- c("Q22", "Q12", "Q5", "Q1", "Q23", "Q13", "Q6", "Q2")
+south_sectors <- c("Q25", "Q21", "Q11", "Q4")
+```
+
+```{r}
+ems <- ems %>%
+  filter(
+    !is.na(actual_travel_time),
+    !is.na(distance),
+    !is.na(DISPATCH.PRIORITY.NAME),
+    !is.na(sector_id),
+    !is.na(REF.GRID),
+    is.finite(actual_travel_time),
+    is.finite(distance)
+  ) %>%
+  mutate(
+    DISPATCH.PRIORITY.NAME = droplevels(factor(DISPATCH.PRIORITY.NAME)),
+    sector_id              = droplevels(factor(sector_id)),
+    REF.GRID               = droplevels(factor(REF.GRID))
+  ) |>
+  mutate(
+    region = if_else(sector_id %in% north_sectors, "NORTH", if_else(sector_id %in% south_sectors, "SOUTH", "CENTRAL"))
+  )
+
+ems_pts = st_as_sf(ems, coords = c("REF.GPS.LON","REF.GPS.LAT"), crs = 4326)
+
+m1 <- lme(
+  fixed  = actual_travel_time ~ distance + DISPATCH.PRIORITY.NAME,
+  random = ~ 1 | sector_id,
+  weights = varIdent(form = ~ 1 | region),
+  data   = ems,
+  method = "REML"
+)
+summary(m1)
+```
+
+```{r}
+# m1 is your fitted model
+sector_re <- as.data.frame(ranef(m1)) %>%
+  rownames_to_column("sector_id") %>%
+  rename(re_intercept = `(Intercept)`)
+
+# (Optional) join back to sectors for mapping or tables
+sectors_with_re <- sectors %>%
+  left_join(sector_re, by = "sector_id")
+
+stations <- data.frame(
+  name = c("Central Station", "South Station"),
+  lat  = c(36.345, 36.2765),
+  lon  = c(-78.3905, -78.4004)
+)
+stations_sf <- st_as_sf(stations, coords = c("lon", "lat"), crs = 4326)
+
+sector_labels <- st_point_on_surface(sectors) %>%
+  mutate(label = sector_id)
+
+# Plot: only boundaries + labels
+ggplot() +
+  geom_sf(data = sectors, fill = NA, color = "black", linewidth = 0.3) +
+  geom_sf_text(data = sector_labels, aes(label = label), size = 3) +
+  coord_sf(expand = FALSE) +
+  labs(
+    title = "Sector Boundaries and IDs",
+    x = "Longitude", y = "Latitude"
+  ) +
+  theme_minimal(base_size = 12)
+
+
+ggplot() +
+  geom_sf(data = sectors_with_re, aes(fill = re_intercept), color = "white", linewidth = 0.15) +
+  geom_sf_text(data = sectors_with_re, aes(label = round(re_intercept, 1)), size = 3) +
+  # add the station points
+  geom_sf(data = stations_sf, color = "red", size = 4, shape = 19) +
+  # optionally label the stations
+  geom_sf_text(data = stations_sf, aes(label = name), color = "red", nudge_y = 0.01, size = 3.5) +
+  scale_fill_viridis_c() +
+  coord_sf(expand = FALSE) +
+  labs(title = "Split Sectors with Random Effect Intercept Values",
+       fill = "RE Intercept",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# visualize
+ggplot() +
+  geom_sf(data = sectors, aes(fill = n_calls), color = "white", linewidth = 0.15) +
+  geom_sf(data = ems_pts, size = 0.3, alpha = 0.5, aes(color = region)) +
+  # add the station points
+  geom_sf(data = stations_sf, color = "red", size = 4, shape = 19) +
+  # optionally label the stations
+  geom_sf_text(data = stations_sf, aes(label = name), color = "red", nudge_y = 0.01, size = 3.5) +
+  scale_fill_viridis_c(trans = "sqrt") +
+  coord_sf(expand = FALSE) +
+  labs(title = "Split Sectors with Number of Calls Per Cell",
+       fill = "Calls / cell",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+```{r}
+# data actually used by the model (guaranteed to line up with fitted/residuals)
+ems_used <- getData(m1)
+
+diag_df <- tibble(
+  fitted    = fitted(m1),
+  resid_raw = residuals(m1, type = "response"),    # in seconds
+  resid_norm= residuals(m1, type = "normalized"),  # standardized (use these)
+  region    = ems_used$region,
+  sector_id = ems_used$sector_id,
+  observed  = ems_used$actual_travel_time,
+)
+
+# 1) Residuals vs fitted
+ggplot(diag_df, aes(fitted, resid_norm)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, color = "red") +
+  labs(title = "Residuals vs Fitted", x = "Fitted (s)", y = "Normalized residuals") +
+  theme_minimal(12)
+
+# 2) QQ plot of residuals
+qqnorm(diag_df$resid_norm); qqline(diag_df$resid_norm, col = "red", lwd = 2)
+
+# 3) QQ plot of random intercepts
+re_sec <- as.data.frame(ranef(m1))$`(Intercept)`
+qqnorm(re_sec, main = "QQ: Sector random intercepts")
+qqline(re_sec, col = "red", lwd = 2)
+```
