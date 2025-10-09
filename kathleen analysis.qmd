@@ -5,7 +5,6 @@
 library(tidyverse)
 library(lubridate)
 
-# Load the .RData (whatever object name is inside)
 objs_loaded <- load("emsData.RData")
 ems <- if ("ems" %in% objs_loaded) get("ems") else if ("x" %in% objs_loaded) get("x") else stop("No 'ems' or 'x' in emsData.RData")
 
@@ -169,7 +168,6 @@ simulate_scenario <- function(incidents, units_cfg_named_vec) {
 
 ```{r}
 # ---- CHUNK 3b: Redefine incidents to match the other group ----
-# (Assumes to_posix() and ems are already defined in earlier chunk)
 
 ems_for_inc <- ems %>%
   mutate(
@@ -197,9 +195,6 @@ ems_for_inc <- ems %>%
 
 # ---- CHUNK 4: Define scenarios and run them ----
 
-# Use the standardized table from Chunk 1
-# replace your current `inc <- ...` with this stricter version
-# ---- start of CHUNK 4 (rebuild inc, then simulate) ----
 inc <- ems_for_inc %>%
   filter(!is.na(dispatch_at),
          !is.na(service_secs),
@@ -209,7 +204,6 @@ inc <- ems_for_inc %>%
   arrange(dispatch_at)
 
 # Scenarios stored as named numeric vectors (not lists of lists)
-# Explicit list-column; each element is a *named* numeric vector
 scenarios <- tibble::tibble(
   scenario  = c("S1","S2","S3","S4","S5"),
   units_cfg = list(
@@ -221,12 +215,6 @@ scenarios <- tibble::tibble(
   )
 )
 
-# optional assert to catch issues early
-stopifnot(all(vapply(
-  scenarios$units_cfg,
-  function(x) !is.null(names(x)) && length(names(x)) == length(x),
-  logical(1)
-)))
 
 # Run each scenario
 sim_results <- scenarios %>%
@@ -246,8 +234,6 @@ sim_results <- sim_results %>%
     total_time_secs     = as.numeric(total_response_secs + service_secs)
   )
 
-# Optional quick diag
-# str(sim_results$total_response_secs); summary(sim_results$total_response_secs)
 
 # Keep only finite, plausible response times (0–2 hours)
 sim_results_clean <- sim_results %>%
@@ -345,7 +331,6 @@ ggplot(sim_results_clean, aes(x = total_response_secs, color = scenario)) +
 
 ```{r}
 # ---- CHUNK 6b: Logistic models for on-time performance ----
-# Uses sim_results_clean (travel+wait only) created at end of Chunk 4
 
 library(tidyverse)
 
