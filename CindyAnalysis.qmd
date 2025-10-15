@@ -427,11 +427,11 @@ stopifnot(all(c("Incident_ID","DT.DISP","DT.AVAILABLE") %in% names(ems)))
 
 # Scenario set (adjust counts as needed)
 scenario_defs <- list(
-  S1 = c(Central = 3, South     = 1),
-  S2 = c(Central = 3, NearNorth = 1),
-  S3 = c(Central = 3, FarNorth  = 1),
-  S4 = c(Central = 2, NearNorth = 1, South = 1),
-  S5 = c(Central = 2, FarNorth  = 1, South = 1)
+  S0 = c(Central = 3, South     = 1),
+  S1 = c(Central = 3, NearNorth = 1),
+  S2 = c(Central = 3, FarNorth  = 1),
+  S3 = c(Central = 2, NearNorth = 1, South = 1),
+  S4 = c(Central = 2, FarNorth  = 1, South = 1)
 )
 
 # Run every scenario on the full `ems` (original dataset)
@@ -452,26 +452,291 @@ ems_simplified <- sim_by_scenario %>%
   relocate(Incident_ID, Scenario, sim_time, .before = dplyr::everything())
 ```
 
+```{r}
+
+# --- Helper to get the original station from `ems`
+derive_orig_station <- function(ems) {
+  if ("original_assignment" %in% names(ems)) {
+    ems %>%
+      transmute(Incident_ID, orig_station = as.character(original_assignment))
+  } else if ("BASE.NAME" %in% names(ems)) {
+    # Adjust this mapping to your system:
+    # Example: Company 9 = Central, everything else = South
+    ems %>%
+      transmute(
+        Incident_ID,
+        orig_station = case_when(
+          BASE.NAME == "Company 9" ~ "Central",
+          TRUE ~ "South"
+        )
+      )
+  } else {
+    stop("Need either `original_assignment` or `BASE.NAME` in `ems` to derive original station.")
+  }
+}
+
+# Ensure character Incident_ID in both frames
+ems_simplified <- ems_simplified %>% mutate(Incident_ID = as.character(Incident_ID))
+
+# 1) If an S0 baseline scenario exists, compare to that
+if ("Scenario" %in% names(ems_simplified) &&
+    any(ems_simplified$Scenario == "S0", na.rm = TRUE)) {
+
+  baseline <- ems_simplified %>%
+    filter(Scenario == "S0") %>%
+    select(Incident_ID, base_assigned_from = assigned_from)
+
+  ems_simplified <- ems_simplified %>%
+    left_join(baseline, by = "Incident_ID") %>%
+    mutate(
+      switched = !is.na(assigned_from) & !is.na(base_assigned_from) &
+                 assigned_from != base_assigned_from
+    )
+
+} else {
+  # 2) Else compare to original station derived from `ems`
+  # Make sure ems has Incident_ID already (as you did earlier)
+  ems <- ems %>% mutate(Incident_ID = as.character(Incident_ID))
+  orig <- derive_orig_station(ems) %>% distinct(Incident_ID, .keep_all = TRUE)
+
+  ems_simplified <- ems_simplified %>%
+    left_join(orig, by = "Incident_ID") %>%
+    mutate(
+      switched = !is.na(assigned_from) & !is.na(orig_station) &
+                 assigned_from != orig_station
+    )
+}
+```
+
+```{r}
+# some ambulances dont go to patient scene and are missing data, we won't
+# consider them in our model
+ems_model <- ems_simplified %>%
+  mutate(
+    Scenario = as.factor(Scenario),
+    region   = as.factor(region),
+    DISPATCH.PRIORITY.NAME = as.factor(DISPATCH.PRIORITY.NAME)
+  ) %>%
+  filter(
+    is.finite(sim_time),
+    !is.na(Scenario),
+    !is.na(DISPATCH.PRIORITY.NAME),
+    !is.na(region),
+    !is.na(Incident_ID)
+  ) %>%
+  droplevels()
+```
+
 MODELLING
 ```{r}
-m3 <- lme(
+m2 <- lme(
   fixed  = sim_time ~ Scenario + DISPATCH.PRIORITY.NAME,
   random = ~ 1 | Incident_ID,
   weights = varIdent(form = ~ 1 | region),
-  data   = ems,
-  method = "REML"
-)
-summary(m3)
-```
-
-
-```{r}
-m2 <- lme(
-  fixed  = actual_travel_time ~ Scenario + DISPATCH.PRIORITY.NAME,
-  random = ~ 1 | Incident_ID,
-  weights = varIdent(form = ~ 1 | region),
-  data   = ems_simplified,
+  data   = ems_model,
   method = "REML"
 )
 summary(m2)
 ```
+
+RESIDUALS
+
+```{r}
+
+# --- STEP 1: Identify all Incident_IDs that ever switched ---
+# This creates a vector of Incident_IDs where 'switched' is "TRUE" at least once.
+red_incident_ids <- ems_model %>%
+  filter(switched == "TRUE") %>%
+  distinct(Incident_ID) %>%
+  pull(Incident_ID)
+
+# --- STEP 2 & 3: Create the plot data frame and flag the points ---
+
+# Create a data frame combining the model results and the original Incident_ID
+model_data <- data.frame(
+  Fitted = fitted(m2),       # Fitted values from the LME model
+  Residuals = resid(m2),     # Residuals from the LME model
+  Incident_ID = ems_model$Incident_ID # Get the Incident_ID in the same order
+)
+
+# Create the coloring variable
+model_data <- model_data %>%
+  mutate(
+    # Check if the Incident_ID is in the list of 'red_incident_ids'
+    ColorGroup = ifelse(Incident_ID %in% red_incident_ids, "Switched_TRUE", "Switched_FALSE")
+  )
+
+# --- STEP 4: Create the ggplot plot with coloring ---
+residual_plot_colored <- ggplot(model_data, aes(x = Fitted, y = Residuals, color = ColorGroup)) +
+  # Add points, colored by the new variable
+  geom_point(alpha = 0.6, size = 1.5) +
+  # Add a horizontal line at y=0 for reference
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5) +
+  # Manually set colors: ensuring 'Switched_TRUE' is red
+  scale_color_manual(
+    values = c("Switched_TRUE" = "red", "Switched_FALSE" = "black"),
+    labels = c("Switched_TRUE" = "Incident Switched (Red)", "Switched_FALSE" = "Incident Did Not Switch (Black)")
+  ) +
+  # Set the plot title and axis labels
+  labs(
+    title = "Residuals vs. Fitted Values Plot (Colored by Incident Switch Status)",
+    x = "Fitted Values",
+    y = "Residuals",
+    color = "Incident Status" # Legend title
+  ) +
+  # Apply a clean theme and position the legend
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Display the plot
+print(residual_plot_colored)
+```
+
+```{r}
+kpis_region <- ems_model %>%
+  group_by(Scenario, sector_id) %>%
+  summarise(
+    mean_sim = mean(sim_time, na.rm = TRUE),
+    p90      = quantile(sim_time, 0.90, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r}
+library(emmeans)
+emm_scn <- emmeans(m2, ~ Scenario)  # averaged over priority & region mix in your data
+emm_tbl <- as.data.frame(emm_scn) %>%
+  arrange(emmean)
+```
+
+
+```{r}
+switch_rate <- ems_model %>%
+  group_by(Scenario) %>%
+  summarise(
+    pct_switched = mean(switched, na.rm = TRUE)
+  )
+```
+
+```{r}
+switch_effect <- ems_model %>%
+  group_by(Scenario, switched) %>%
+  summarise(mean_sim = mean(sim_time, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = switched, values_from = mean_sim, names_prefix = "mean_") %>%
+  mutate(delta_switching = `mean_TRUE` - `mean_FALSE`)
+```
+
+```{r}
+combo <- switch_effect %>%
+  left_join(switch_rate, by = "Scenario") %>%
+  arrange(Scenario)
+
+combo
+```
+
+```{r}
+# m2 is your fitted model
+sector_re_m2 <- as.data.frame(ranef(m2)) %>%
+  rownames_to_column("sector_id") %>%
+  rename(re_intercept = `(Intercept)`)
+
+# (Optional) join back to sectors for mapping or tables
+sectors_with_re_m2 <- sectors %>%
+  left_join(sector_re_m2, by = "sector_id")
+
+stations_sf <- st_as_sf(stations, coords = c("lon", "lat"), crs = 4326)
+
+# Plot: only boundaries + labels
+ggplot() +
+  geom_sf(data = sectors, fill = NA, color = "black", linewidth = 0.3) +
+  geom_sf_text(data = sector_labels, aes(label = label), size = 3) +
+  coord_sf(expand = FALSE) +
+  labs(
+    title = "Sector Boundaries and IDs",
+    x = "Longitude", y = "Latitude"
+  ) +
+  theme_minimal(base_size = 12)
+
+ggplot() +
+  geom_sf(data = sectors_with_re_m2, aes(fill = re_intercept), color = "white", linewidth = 0.15) +
+  geom_sf_text(data = sectors_with_re_m2, aes(label = round(re_intercept, 1)), size = 3) +
+  # add the station points
+  geom_sf(data = stations_sf, color = "red", size = 4, shape = 19) +
+  # optionally label the stations
+  geom_sf_text(data = stations_sf, aes(label = name), color = "red", nudge_y = 0.01, size = 3.5) +
+  scale_fill_viridis_c() +
+  coord_sf(expand = FALSE) +
+  labs(title = "Split Sectors with Random Effect Intercept Values",
+       fill = "RE Intercept",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+```{r}
+incident_re <- ranef(m2) %>%
+  as.data.frame() %>%
+  rownames_to_column("Incident_ID") %>%
+  rename(re_intercept = `(Intercept)`)
+
+# --- 2) Map incidents to sectors, then aggregate RE to sector level
+inc_to_sector <- ems_simplified %>%
+  distinct(Incident_ID, sector_id)
+
+sector_re <- incident_re %>%
+  left_join(inc_to_sector, by = "Incident_ID") %>%
+  filter(!is.na(sector_id)) %>%
+  group_by(sector_id) %>%
+  summarise(re_intercept = mean(re_intercept, na.rm = TRUE), .groups = "drop")
+
+# --- 3) Join to sectors sf for mapping
+sectors_with_re <- sectors %>%
+  left_join(sector_re, by = "sector_id")
+
+# Optional: create label points
+sector_labels <- st_point_on_surface(sectors_with_re) %>%
+  mutate(label = sector_id)
+
+# (Optional) Station points (edit coords/names as needed)
+stations <- data.frame(
+  name = c("Central Station", "South Station"),
+  lat  = c(36.345, 36.2765),
+  lon  = c(-78.3905, -78.4004)
+)
+stations_sf <- st_as_sf(stations, coords = c("lon","lat"), crs = 4326)
+
+# --- 4) Plots ---------------------------------------------------------------
+
+# Boundaries + IDs (reference)
+ggplot() +
+  geom_sf(data = sectors, fill = NA, color = "black", linewidth = 0.3) +
+  geom_sf_text(data = sector_labels, aes(label = label), size = 3) +
+  coord_sf(expand = FALSE) +
+  labs(
+    title = "Sector Boundaries and IDs",
+    x = "Longitude", y = "Latitude"
+  ) +
+  theme_minimal(base_size = 12)
+
+# Choropleth of sector-level random intercepts (from m2)
+ggplot() +
+  geom_sf(data = sectors_with_re, aes(fill = re_intercept), color = "white", linewidth = 0.15) +
+  geom_sf_text(data = sectors_with_re, aes(label = round(re_intercept, 1)), size = 3) +
+  geom_sf(data = stations_sf, color = "red", size = 4, shape = 19) +
+  geom_sf_text(data = stations_sf, aes(label = name), color = "red", nudge_y = 0.01, size = 3.5) +
+  scale_fill_viridis_c() +
+  coord_sf(expand = FALSE) +
+  labs(
+    title = "Sector Random Intercepts from m2 (aggregated from Incident_ID)",
+    fill  = "RE Intercept",
+    x = "Longitude", y = "Latitude"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+
