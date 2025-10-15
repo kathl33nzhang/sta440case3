@@ -8,17 +8,27 @@ rm(list = ls())
 library(tidyverse)
 library(nlme)
 library(sf)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(tibble)
 set.seed(440)
 
 load("emsData.RData")
 ```
 
 ```{r}
-ems <- x |>
+ems <- x %>%
+  mutate(Incident_ID = as.character(rownames(.)))
+```
+
+
+```{r}
+ems_simplified <- ems |>
   mutate(
     actual_travel_time = as.numeric(DT.ARRIVE - DT.DISP)
   ) |>
-  select(REF.GRID, DISPATCH.PRIORITY.NAME, REF.GPS.LAT, REF.GPS.LON, VEHCGPS, actual_travel_time) |>
+  select(Incident_ID, REF.GRID, DISPATCH.PRIORITY.NAME, REF.GPS.LAT, REF.GPS.LON, VEHCGPS, actual_travel_time) |>
   # split "VEHCGPS" ("36.345, -78.3905") into numeric lat/lon
   separate(VEHCGPS, into = c("VEH.GPS.LAT", "VEH.GPS.LON"), sep = ",", convert = TRUE) %>%
   mutate(
@@ -32,7 +42,7 @@ ems <- x |>
 
 ```{r}
 # Input: your points (already made above)
-ems_pts = st_as_sf(ems, coords = c("REF.GPS.LON","REF.GPS.LAT"), crs = 4326)
+ems_pts = st_as_sf(ems_simplified, coords = c("REF.GPS.LON","REF.GPS.LAT"), crs = 4326)
 
 # ---- PARAMETERS ----
 max_calls     <- 50      # split if a cell has > max_calls
@@ -143,11 +153,11 @@ if (any(missing)) {
 }
 
 # 2) Write sector_id back onto your original ems data.frame (same row order)
-ems$sector_id <- ems_pts_with_sector$sector_id
+ems_simplified$sector_id <- ems_pts_with_sector$sector_id
 
 # (optional) quick check
-table(is.na(ems$sector_id))
-head(ems$sector_id)
+table(is.na(ems_simplified$sector_id))
+head(ems_simplified$sector_id)
 ```
 ```{r}
 # Assumes:
@@ -156,7 +166,7 @@ head(ems$sector_id)
 #   - ems has a column sector_id matching polygons
 
 # Count points per sector (from ems)
-sector_counts <- ems %>%
+sector_counts <- ems_simplified %>%
   count(sector_id, name = "n_calls")
 
 # Centroids for labeling (point-on-surface ensures label inside polygon)
@@ -168,7 +178,7 @@ south_sectors <- c("Q25", "Q21", "Q11", "Q4")
 ```
 
 ```{r}
-ems <- ems %>%
+ems_simplified <- ems_simplified %>%
   filter(
     !is.na(actual_travel_time),
     !is.na(distance),
@@ -187,13 +197,13 @@ ems <- ems %>%
     region = if_else(sector_id %in% north_sectors, "NORTH", if_else(sector_id %in% south_sectors, "SOUTH", "CENTRAL"))
   )
 
-ems_pts = st_as_sf(ems, coords = c("REF.GPS.LON","REF.GPS.LAT"), crs = 4326)
+ems_pts = st_as_sf(ems_simplified, coords = c("REF.GPS.LON","REF.GPS.LAT"), crs = 4326)
 
 m1 <- lme(
   fixed  = actual_travel_time ~ distance + DISPATCH.PRIORITY.NAME,
   random = ~ 1 | sector_id,
   weights = varIdent(form = ~ 1 | region),
-  data   = ems,
+  data   = ems_simplified,
   method = "REML"
 )
 summary(m1)
@@ -294,4 +304,174 @@ qqnorm(diag_df$resid_norm); qqline(diag_df$resid_norm, col = "red", lwd = 2)
 re_sec <- as.data.frame(ranef(m1))$`(Intercept)`
 qqnorm(re_sec, main = "QQ: Sector random intercepts")
 qqline(re_sec, col = "red", lwd = 2)
+```
+
+
+SIMULATIONS
+
+```{r}
+eta_col_for <- function(station) {
+  switch(station,
+    "Central"   = "eTT.BG.Ce",
+    "South"     = "eTT.BG.So",
+    "NearNorth" = "eTT.BG.NN",
+    "FarNorth"  = "eTT.BG.FN",
+    stop(sprintf("Unknown station: %s", station))
+  )
+}
+
+# safer difftime in seconds
+sec_between <- function(a, b) {
+  as.numeric(difftime(a, b, units = "secs"))
+}
+
+# Core simulator: queue + assign shortest ETA among available units
+simulate_dispatch <- function(dat, units_vec_named) {
+  # dat must contain: Incident_ID, DT.DISP, DT.AVAILABLE, ETA columns used by stations
+  if (is.null(names(units_vec_named)) || anyNA(names(units_vec_named))) {
+    stop("`units_vec_named` must be a *named* numeric vector, e.g. c(Central=3, South=1).")
+  }
+  if (sum(units_vec_named) <= 0) stop("No units in scenario.")
+
+  # Order incidents deterministically
+  dat <- dat[order(dat$DT.DISP, dat$DT.AVAILABLE, dat$Incident_ID), ]
+  rownames(dat) <- NULL
+
+  # Build fleet frame: one row per ambulance
+  stations <- rep(names(units_vec_named), times = as.integer(units_vec_named))
+  unit_idx <- ave(seq_along(stations), stations, FUN = seq_along)
+  fleet <- data.frame(
+    station   = stations,
+    unit_id   = paste0(stations, "_", unit_idx),
+    next_free = min(dat$DT.DISP, na.rm = TRUE) - 1,   # all free just before first call
+    stringsAsFactors = FALSE
+  )
+
+  # Output containers
+  n <- nrow(dat)
+  out_station <- character(n)
+  out_unit    <- character(n)
+  out_wait    <- numeric(n)
+  out_travel  <- numeric(n)
+
+  # Sim loop
+  for (i in seq_len(n)) {
+    t_call <- dat$DT.DISP[i]
+    if (is.na(t_call)) next
+
+    # service duration as observed (dispatch -> available)
+    svc <- sec_between(dat$DT.AVAILABLE[i], dat$DT.DISP[i])
+    if (!is.finite(svc) || svc < 0) svc <- 0
+
+    # per-unit ETA to this call
+    eta_cols <- vapply(fleet$station, eta_col_for, character(1))
+    eta_vals <- vapply(eta_cols, function(col) {
+      if (!col %in% names(dat)) return(Inf)
+      v <- dat[[col]][i]
+      if (is.na(v)) Inf else as.numeric(v)   # assume ETAs already in seconds
+    }, numeric(1))
+
+    available_now <- fleet$next_free <= t_call
+    available_now[is.na(available_now)] <- FALSE
+
+    if (any(available_now)) {
+      # choose among free units by minimal ETA (if all Inf, take the first free)
+      idx_free <- which(available_now)
+      best_idx <- if (any(is.finite(eta_vals[idx_free]))) {
+        idx_free[ which.min(eta_vals[idx_free]) ]
+      } else {
+        idx_free[1]
+      }
+      wait_s   <- 0
+      travel_s <- if (is.finite(eta_vals[best_idx])) eta_vals[best_idx] else 0
+      depart   <- t_call
+    } else {
+      # nobody free: take earliest to free; waiting starts until that moment
+      soonest  <- which.min(fleet$next_free)
+      depart   <- fleet$next_free[soonest]
+      wait_s   <- sec_between(depart, t_call)
+      travel_s <- if (is.finite(eta_vals[soonest])) eta_vals[soonest] else 0
+      best_idx <- soonest
+    }
+
+    # update busy time (use observed svc; do NOT add travel again to svc)
+    fleet$next_free[best_idx] <- depart + wait_s + svc
+
+    # record
+    out_station[i] <- fleet$station[best_idx]
+    out_unit[i]    <- fleet$unit_id[best_idx]
+    out_wait[i]    <- wait_s
+    out_travel[i]  <- travel_s
+  }
+
+  tibble::tibble(
+    Incident_ID   = dat$Incident_ID,
+    assigned_unit = out_unit,
+    assigned_from = out_station,
+    wait_secs     = out_wait,
+    travel_secs   = out_travel,
+    sim_time      = out_wait + out_travel   # dispatch→arrival + queue delay
+  )
+}
+```
+
+```{r}
+# Ensure required columns exist in `ems`
+stopifnot(all(c("Incident_ID","DT.DISP","DT.AVAILABLE") %in% names(ems)))
+
+# If your ETA fields are in minutes or some other unit, convert them to seconds first.
+# Example (uncomment if needed):
+# for (nm in c("eTT.Op.Ce","eTT.Op.So","eTT.Op.NN","eTT.Op.FN")) {
+#   if (nm %in% names(ems)) ems[[nm]] <- as.numeric(ems[[nm]])  # assume already seconds
+# }
+
+# Scenario set (adjust counts as needed)
+scenario_defs <- list(
+  S1 = c(Central = 3, South     = 1),
+  S2 = c(Central = 3, NearNorth = 1),
+  S3 = c(Central = 3, FarNorth  = 1),
+  S4 = c(Central = 2, NearNorth = 1, South = 1),
+  S5 = c(Central = 2, FarNorth  = 1, South = 1)
+)
+
+# Run every scenario on the full `ems` (original dataset)
+sim_by_scenario <- imap_dfr(
+  scenario_defs,
+  ~ simulate_dispatch(ems, .x) %>% mutate(Scenario = .y),
+  .id = NULL
+)
+
+# Keep plausible simulated responses (e.g., under ~33 minutes = 2000s), like your filter
+sim_by_scenario <- sim_by_scenario %>%
+  filter(is.finite(sim_time), sim_time >= 0, sim_time < 2000)
+
+# Merge simulated scenario rows into your modeling frame `ems_simplified`
+# Result: one row per Incident_ID x Scenario with sim_time + your modeling covariates
+ems_simplified <- sim_by_scenario %>%
+  left_join(ems_simplified, by = "Incident_ID") %>%
+  relocate(Incident_ID, Scenario, sim_time, .before = dplyr::everything())
+```
+
+MODELLING
+```{r}
+m3 <- lme(
+  fixed  = sim_time ~ Scenario + DISPATCH.PRIORITY.NAME,
+  random = ~ 1 | Incident_ID,
+  weights = varIdent(form = ~ 1 | region),
+  data   = ems,
+  method = "REML"
+)
+summary(m3)
+```
+
+
+```{r}
+m2 <- lme(
+  fixed  = actual_travel_time ~ Scenario + DISPATCH.PRIORITY.NAME,
+  random = ~ 1 | Incident_ID,
+  weights = varIdent(form = ~ 1 | region),
+  data   = ems_simplified,
+  method = "REML"
+)
+summary(m2)
 ```
