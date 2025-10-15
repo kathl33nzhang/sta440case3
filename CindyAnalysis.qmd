@@ -312,10 +312,10 @@ SIMULATIONS
 ```{r}
 eta_col_for <- function(station) {
   switch(station,
-    "Central"   = "eTT.BG.Ce",
-    "South"     = "eTT.BG.So",
-    "NearNorth" = "eTT.BG.NN",
-    "FarNorth"  = "eTT.BG.FN",
+    "Central"   = "eTT.UA.Ce",
+    "South"     = "eTT.UA.So",
+    "NearNorth" = "eTT.UA.NN",
+    "FarNorth"  = "eTT.UA.FN",
     stop(sprintf("Unknown station: %s", station))
   )
 }
@@ -525,6 +525,10 @@ ems_model <- ems_simplified %>%
     !is.na(Incident_ID)
   ) %>%
   droplevels()
+
+ems_model <- ems_model %>%
+  mutate(DISPATCH.PRIORITY.NAME = relevel(factor(DISPATCH.PRIORITY.NAME),
+                                          ref = "Non Emergency"))
 ```
 
 MODELLING
@@ -536,8 +540,24 @@ m2 <- lme(
   data   = ems_model,
   method = "REML"
 )
+
 summary(m2)
 ```
+`DISPATCH.PRIORITY.NAME` appears to be insignificant. We re=model after dropping the variable.
+
+```{r}
+m3 <- lme(
+  fixed  = sim_time ~ Scenario,
+  random = ~ 1 | Incident_ID,
+  weights = varIdent(form = ~ 1 | region),
+  data   = ems_model,
+  method = "REML"
+)
+
+summary(m3)
+```
+
+
 
 RESIDUALS
 
@@ -554,8 +574,8 @@ red_incident_ids <- ems_model %>%
 
 # Create a data frame combining the model results and the original Incident_ID
 model_data <- data.frame(
-  Fitted = fitted(m2),       # Fitted values from the LME model
-  Residuals = resid(m2),     # Residuals from the LME model
+  Fitted = fitted(m3),       # Fitted values from the LME model
+  Residuals = resid(m3),     # Residuals from the LME model
   Incident_ID = ems_model$Incident_ID # Get the Incident_ID in the same order
 )
 
@@ -616,9 +636,7 @@ switch_rate <- ems_model %>%
   summarise(
     pct_switched = mean(switched, na.rm = TRUE)
   )
-```
 
-```{r}
 switch_effect <- ems_model %>%
   group_by(Scenario, switched) %>%
   summarise(mean_sim = mean(sim_time, na.rm = TRUE), .groups = "drop") %>%
@@ -627,52 +645,19 @@ switch_effect <- ems_model %>%
 ```
 
 ```{r}
+library(kableExtra)
+
 combo <- switch_effect %>%
   left_join(switch_rate, by = "Scenario") %>%
   arrange(Scenario)
 
+kable(
+  combo,
+  digits = 3,
+  row.names = NA,
+  col.names = NA
+)
 combo
-```
-
-```{r}
-# m2 is your fitted model
-sector_re_m2 <- as.data.frame(ranef(m2)) %>%
-  rownames_to_column("sector_id") %>%
-  rename(re_intercept = `(Intercept)`)
-
-# (Optional) join back to sectors for mapping or tables
-sectors_with_re_m2 <- sectors %>%
-  left_join(sector_re_m2, by = "sector_id")
-
-stations_sf <- st_as_sf(stations, coords = c("lon", "lat"), crs = 4326)
-
-# Plot: only boundaries + labels
-ggplot() +
-  geom_sf(data = sectors, fill = NA, color = "black", linewidth = 0.3) +
-  geom_sf_text(data = sector_labels, aes(label = label), size = 3) +
-  coord_sf(expand = FALSE) +
-  labs(
-    title = "Sector Boundaries and IDs",
-    x = "Longitude", y = "Latitude"
-  ) +
-  theme_minimal(base_size = 12)
-
-ggplot() +
-  geom_sf(data = sectors_with_re_m2, aes(fill = re_intercept), color = "white", linewidth = 0.15) +
-  geom_sf_text(data = sectors_with_re_m2, aes(label = round(re_intercept, 1)), size = 3) +
-  # add the station points
-  geom_sf(data = stations_sf, color = "red", size = 4, shape = 19) +
-  # optionally label the stations
-  geom_sf_text(data = stations_sf, aes(label = name), color = "red", nudge_y = 0.01, size = 3.5) +
-  scale_fill_viridis_c() +
-  coord_sf(expand = FALSE) +
-  labs(title = "Split Sectors with Random Effect Intercept Values",
-       fill = "RE Intercept",
-       x = "Longitude", y = "Latitude") +
-  theme_minimal(base_size = 12) +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1)
-  )
 ```
 
 ```{r}
@@ -695,18 +680,6 @@ sector_re <- incident_re %>%
 sectors_with_re <- sectors %>%
   left_join(sector_re, by = "sector_id")
 
-# Optional: create label points
-sector_labels <- st_point_on_surface(sectors_with_re) %>%
-  mutate(label = sector_id)
-
-# (Optional) Station points (edit coords/names as needed)
-stations <- data.frame(
-  name = c("Central Station", "South Station"),
-  lat  = c(36.345, 36.2765),
-  lon  = c(-78.3905, -78.4004)
-)
-stations_sf <- st_as_sf(stations, coords = c("lon","lat"), crs = 4326)
-
 # --- 4) Plots ---------------------------------------------------------------
 
 # Boundaries + IDs (reference)
@@ -718,7 +691,8 @@ ggplot() +
     title = "Sector Boundaries and IDs",
     x = "Longitude", y = "Latitude"
   ) +
-  theme_minimal(base_size = 12)
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 # Choropleth of sector-level random intercepts (from m2)
 ggplot() +
@@ -736,7 +710,5 @@ ggplot() +
   theme_minimal(base_size = 12) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
-
-
 
 
