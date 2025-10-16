@@ -17,7 +17,6 @@ set.seed(440)
 load("emsData.RData")
 ```
 
-
 ## PREPPING EMS
 ```{r}
 ems <- x %>%
@@ -31,17 +30,14 @@ ems <- ems |>
 ```
 
 ```{r}
-ems <- ems |> 
-  group_by(DT.DISP, BASE.NAME) |> 
-  mutate( 
-    Incident_ID = cur_group_id(), 
-    Patient_Count = n(), 
-    Patient_Number = row_number() 
-    ) |> 
+ems <- ems |>
+  group_by(DT.DISP, BASE.NAME) |>
+  mutate(
+    Incident_ID = cur_group_id(),
+    Patient_Count = n()
+  ) |>
+  slice(1) |>
   ungroup()
-
-ems <- ems |> 
-  filter(Patient_Number == 1)
 ```
 
 ## MAKING SIMPLIFIED EMS
@@ -575,283 +571,6 @@ summ_tbl <- ems_model %>%
 print(summ_tbl)
 ```
 
-## NEW SIMULATION TEST
-
-```{r}
-std_names <- function(df) {
-  nm <- names(df)
-  nm[nm == "incident_id"] <- "Incident_ID"
-  nm[nm == "scenario"]    <- "Scenario"
-  names(df) <- nm
-  df
-}
-```
-
-```{r}
-library(tidyverse)
-library(lubridate)
-
-# Helper: safely coerce to POSIXct if not already
-to_posix <- function(x) if (inherits(x, "POSIXt")) x else ymd_hms(x, quiet = TRUE)
-
-# Ensure UA columns exist (create as NA if missing so mutate won’t error)
-ua_needed <- c("eTT.UA.Ce", "eTT.UA.So", "eTT.UA.NN", "eTT.UA.FN")
-for (nm in ua_needed) if (!nm %in% names(ems)) ems[[nm]] <- NA_real_
-
-# Build standardized incident table
-ems_std <- ems %>%
-  mutate(
-    dispatch_at = to_posix(DT.DISP),
-    clear_at    = to_posix(DT.AVAILABLE),
-    service_secs = as.numeric(difftime(clear_at, dispatch_at, units = "secs")),
-
-    # UA travel times only (seconds); keep as numeric
-    tt_central    = eTT.UA.Ce,
-    tt_south      = eTT.UA.So,
-    tt_near_north = eTT.UA.NN,
-    tt_far_north  = eTT.UA.FN
-  ) %>%
-  arrange(dispatch_at) %>%
-  group_by(dispatch_at) %>%
-  slice(1) %>%                      # one row per incident (first record at that dispatch time)
-  ungroup() %>%
-  select(
-    Incident_ID, dispatch_at, clear_at, service_secs,
-    REF.GRID, DISPATCH.PRIORITY.NAME, BASE.NAME, VEH.GRID,
-    tt_central, tt_south, tt_near_north, tt_far_north
-  )
-
-# Light checks so we know what we have
-message("Rows: ", nrow(ems_std))
-message("Missing dispatch_at: ", sum(is.na(ems_std$dispatch_at)))
-message("Missing clear_at: ", sum(is.na(ems_std$clear_at)))
-message("Non-positive service_secs: ", sum(!is.na(ems_std$service_secs) & ems_std$service_secs <= 0))
-summary(select(ems_std, tt_central, tt_south, tt_near_north, tt_far_north))
-
-```
-
-```{r}
-scenarios <- tibble::tribble(
-  ~scenario, ~units,
-  "S0", list(c(Central=3, South=1)),
-  "S1", list(c(Central=3, NearNorth=1)),
-  "S2", list(c(Central=3, FarNorth=1)),
-  "S3", list(c(Central=2, NearNorth=1, South=1)),
-  "S4", list(c(Central=2, FarNorth=1, South=1))
-)
-
-station_tt_map <- c(
-  Central   = "tt_central",
-  NearNorth = "tt_near_north",
-  FarNorth  = "tt_far_north",
-  South     = "tt_south"
-)
-```
-
-```{r}
-simulate_scenario <- function(incidents, units_cfg_named_vec) {
-  incidents <- std_names(incidents)
-  # require Incident_ID / dispatch_at / service_secs / tt_* cols
-  if (!all(c("Incident_ID","dispatch_at","service_secs") %in% names(incidents))) {
-    stop("incidents must have Incident_ID, dispatch_at, service_secs")
-  }
-
-  # normalize scenario config
-  counts_raw <- units_cfg_named_vec
-  if (is.list(counts_raw)) counts_raw <- unlist(counts_raw, recursive = TRUE, use.names = TRUE)
-  counts <- as.integer(counts_raw); nms <- names(counts_raw)
-  if (is.null(nms) || anyNA(nms) || length(nms) == 0) stop("units_cfg must be a *named* numeric vector")
-  if (sum(counts, na.rm = TRUE) <= 0) stop("Scenario has zero units.")
-
-  station_vec <- rep(nms, times = counts)
-  seq_per_station <- ave(seq_along(station_vec), station_vec, FUN = seq_along)
-  unit_id_vec <- paste0(station_vec, "_", seq_per_station)
-
-  t0 <- suppressWarnings(min(incidents$dispatch_at, na.rm = TRUE))
-  if (!is.finite(as.numeric(t0))) stop("All incident dispatch times are NA.")
-
-  fleet <- data.frame(
-    station   = station_vec,
-    unit_id   = unit_id_vec,
-    next_free = t0 - lubridate::seconds(1),
-    stringsAsFactors = FALSE
-  )
-
-  tt_col_for <- function(st) switch(st,
-    "Central"   = "tt_central",
-    "South"     = "tt_south",
-    "NearNorth" = "tt_near_north",
-    "FarNorth"  = "tt_far_north",
-    stop("Unknown station in scenario: ", st)
-  )
-
-  nI <- nrow(incidents)
-  out <- vector("list", nI)
-
-  for (i in seq_len(nI)) {
-    call_t <- incidents$dispatch_at[i]
-    if (is.na(call_t)) next
-
-    svc <- incidents$service_secs[i]; if (is.na(svc) || svc < 0) svc <- 0
-
-    tt_cols <- vapply(fleet$station, tt_col_for, character(1))
-    tt_vals <- vapply(tt_cols, function(col) {
-      val <- incidents[[col]][i]
-      if (is.null(val) || is.na(val)) Inf else as.numeric(val)
-    }, numeric(1))
-
-    avail <- fleet$next_free <= call_t; avail[is.na(avail)] <- FALSE
-
-    if (!any(avail)) {
-      nf <- as.numeric(fleet$next_free); nf[is.na(nf)] <- Inf
-      chosen <- which.min(nf); if (!length(chosen)) chosen <- 1
-      wait_s <- max(0, as.numeric(difftime(fleet$next_free[chosen], call_t, units = "secs")))
-      travel_s <- if (is.finite(tt_vals[chosen])) tt_vals[chosen] else 0
-      depart_time <- fleet$next_free[chosen]
-    } else {
-      idx <- which(avail)
-      finite_tt <- tt_vals[idx]
-      if (!any(is.finite(finite_tt))) {
-        chosen <- idx[1]; travel_s <- 0
-      } else {
-        chosen <- idx[which.min(finite_tt)]; travel_s <- tt_vals[chosen]
-      }
-      wait_s <- 0; depart_time <- call_t
-    }
-
-    # IMPORTANT: busy time = wait + service (service is dispatch→available already)
-    fleet$next_free[chosen] <- depart_time + lubridate::seconds(wait_s + svc)
-
-    out[[i]] <- tibble::tibble(
-      Incident_ID         = incidents$Incident_ID[i],   # standardized name
-      assigned_from       = fleet$station[chosen],
-      assigned_unit       = fleet$unit_id[chosen],
-      wait_secs           = wait_s,
-      travel_secs         = travel_s,
-      sim_time            = wait_s + travel_s          # dispatch→arrival + queue
-    )
-  }
-
-  dplyr::bind_rows(out)
-}
-
-```
-
-```{r}
-# ---- CHUNK 3b: Redefine incidents to match the other group ----
-ems_for_inc <- ems %>%
-  mutate(
-    dispatch_at  = to_posix(DT.DISP),
-    clear_at     = to_posix(DT.AVAILABLE),
-    service_secs = as.numeric(difftime(clear_at, dispatch_at, units = "secs")),
-    tt_central    = eTT.UA.Ce,
-    tt_south      = eTT.UA.So,
-    tt_near_north = eTT.UA.NN,
-    tt_far_north  = eTT.UA.FN
-  ) %>%
-  arrange(dispatch_at) %>%
-  group_by(dispatch_at, BASE.NAME) %>%
-  slice(1) %>%
-  ungroup() %>%
-  select(Incident_ID, dispatch_at, clear_at, service_secs,
-         tt_central, tt_south, tt_near_north, tt_far_north)
-
-```
-
-```{r}
-# ---- CHUNK 4: Define scenarios and run them ----
-# Use the standardized incidents frame:
-inc <- ems_for_inc %>%
-  filter(!is.na(dispatch_at),
-         !is.na(service_secs),
-         service_secs >= 0) %>%
-  filter(rowSums(!is.na(select(., tt_central, tt_south, tt_near_north, tt_far_north))) >= 1) %>%
-  arrange(dispatch_at)
-
-sim_results <- scenarios %>%
-  mutate(sim = purrr::map(units, ~ simulate_scenario(inc, .x))) %>%
-  select(scenario, sim) %>%
-  tidyr::unnest(sim) %>%
-  left_join(inc %>% select(Incident_ID, service_secs), by = "Incident_ID") %>%
-  mutate(
-    wait_secs           = as.numeric(wait_secs),
-    travel_secs         = as.numeric(travel_secs),
-    service_secs        = as.numeric(service_secs),
-    sim_time            = as.numeric(sim_time),             # response (dispatch→arrival)
-    total_time_secs     = sim_time + service_secs           # dispatch→available under scenario
-  )
-
-sim_results_clean <- sim_results %>%
-  filter(is.finite(sim_time),
-         sim_time >= 0,
-         sim_time <= 2*60*60)
-
-```
-
-```{r}
-cat("\n--- object sizes ---\n")
-for (nm in c("ems_std","ems_for_inc","inc","sim_results","sim_results_clean")) {
-  if (exists(nm)) cat(nm, ": nrow =", nrow(get(nm)), "\n")
-}
-
-cat("\n--- column classes in sim_results_clean ---\n")
-print(sapply(sim_results_clean %>%
-               select(scenario, wait_secs, travel_secs, service_secs,
-                      sim_time, total_time_secs),
-             function(x) paste(class(x), collapse=" / ")))
-
-cat("\n--- quick summaries (should be a few hundred seconds) ---\n")
-print(summary(sim_results_clean$sim_time))
-
-cat("\n--- any impossible values? (> 2 hrs) ---\n")
-bad <- sim_results_clean %>%
-  filter(!is.finite(sim_time) |
-         sim_time < 0 |
-         sim_time > 2*60*60)
-print(nrow(bad))
-print(head(bad, 5))
-
-cat("\n--- are you summarizing the CLEAN table? ---\n")
-summ_tbl_check <- sim_results_clean %>%
-  group_by(scenario) %>%
-  summarise(mean_resp = mean(sim_time), .groups="drop")
-print(summ_tbl_check)
-
-
-```
-```{r}
-ems_cov <- std_names(ems_simplified) %>%
-  distinct(Incident_ID, .keep_all = TRUE)
-
-ems_simplified_new <- sim_results_clean %>%
-  left_join(ems_cov, by = "Incident_ID") %>%
-  relocate(Incident_ID, scenario, sim_time, .before = dplyr::everything()) %>%
-  drop_na()
-
-ems_model <- ems_simplified_new
-```
-
-```{r}
-# Response-time summaries (travel + wait)
-summ_tbl <- ems_simplified_new %>%
-  group_by(scenario) %>%
-  summarise(
-    n               = n(),
-    mean_resp_s     = mean(sim_time),
-    median_resp_s   = median(sim_time),
-    p90_resp_s      = quantile(sim_time, 0.90),
-    p95_resp_s      = quantile(sim_time, 0.95),
-    pct_under_8min  = mean(sim_time <= 8*60),
-    pct_under_10min = mean(sim_time <= 10*60),
-    .groups = "drop"
-  ) %>%
-  arrange(mean_resp_s)
-
-print(summ_tbl)
-```
-
-
-
 ## MODELLING
 ```{r}
 m2 <- lme(
@@ -889,7 +608,7 @@ ems_model <- ems_model %>%
 m3 <- lme(
   fixed  = sim_time ~ Scenario,
   random = ~ 1 | Incident_ID,
-  weights = varIdent(form = ~ 1 | region),
+  weights = varIdent(form = ~ 1 | Scenario),
   data   = ems_model,
   method = "REML"
 )
@@ -976,11 +695,31 @@ qqline(re_sec, col = "red", lwd = 2)
 Many of our residuals are clustered around 0.
 
 ```{r}
-dropped_ems_model <- ems_model |> 
-  group_by(Incident_ID) |> 
-  filter(!all(sim_time == first(sim_time))) |> 
+dropped_ems_model <- ems_model |>
+  group_by(Incident_ID) |>
+  # Keep the group if the number of distinct simulated times is greater than 1
+  filter(n_distinct(sim_time) > 1) |>
   ungroup()
 ```
+
+```{r}
+summ_tbl <- dropped_ems_model %>%
+  group_by(Scenario) %>%
+  summarise(
+    n               = n(),
+    mean_resp_s     = mean(sim_time),
+    median_resp_s   = median(sim_time),
+    p90_resp_s      = quantile(sim_time, 0.90),
+    p95_resp_s      = quantile(sim_time, 0.95),
+    pct_under_8min  = mean(sim_time <= 8*60),
+    pct_under_10min = mean(sim_time <= 10*60),
+    .groups = "drop"
+  ) %>%
+  arrange(mean_resp_s)
+
+print(summ_tbl)
+```
+
 
 ```{r}
 m4 <- lme(
@@ -1063,19 +802,16 @@ ggplot(plot_df, aes(fit1, r_norm, color = as.logical(switched))) +
 ```
 
 ```{r}
-library(dplyr)
 library(emmeans)
-library(nlme)
-library(tidyr)
 
 # Use a balanced panel so scenarios are compared on the same incidents
-complete_ids <- ems_model %>%
+complete_ids <- dropped_ems_model %>%
   count(Incident_ID, Scenario) %>%
   count(Incident_ID, name = "nScen") %>%
-  filter(nScen == n_distinct(ems_model$Scenario)) %>%
+  filter(nScen == n_distinct(dropped_ems_model$Scenario)) %>%
   pull(Incident_ID)
 
-ems_bal <- ems_model %>%
+ems_bal <- dropped_ems_model %>%
   filter(Incident_ID %in% complete_ids) %>%
   mutate(
     Scenario = factor(Scenario),
@@ -1088,7 +824,7 @@ ems_bal <- ems_model %>%
 m2_bal <- lme(
   fixed   = sim_time ~ Scenario + DISPATCH.PRIORITY.NAME,
   random  = ~ 1 | Incident_ID,
-  weights = varIdent(form = ~ 1 | region),
+  weights = varIdent(form = ~ 1 | Scenario),
   data    = ems_bal,
   method  = "REML",
   na.action = na.exclude
@@ -1144,277 +880,3 @@ decision_table <- emm_tbl %>%
 decision_table
 
 ```
-
-
-## OTHER GROUP SIM
-```{r}
-library(tidyverse)
-library(lubridate)
-library(scales)
-library(kableExtra)
-library(lme4)
-load("data/emsData.RData")
-ems <- x
-```
-
-```{r}
-ems <- ems |>
-  group_by(DT.DISP, BASE.NAME) |>
-  mutate(
-Incident_ID = cur_group_id(), Patient_Count = n(), Patient_Number = row_number() ) |>
-  ungroup()
-ems_filtered <- ems |>
-  filter(Patient_Number == 1)
-```
-
-```{r}
-# Scenario 1: Central (3) and South (1)
-central_avail <- 3
-south_avail <- 1
-# Initialize columns with S1_ prefix
-ems_filtered$S1_Ambulances_Central <- NA
-ems_filtered$S1_Ambulances_South <- NA
-ems_filtered$S1_Assigned_Station <- NA
-ems_filtered$S1_Delay <- 0
-# Track when each ambulance becomes available
-central_return_times <- rep(min(ems_filtered$DT.DISP) - 1, central_avail)
-south_return_times <- rep(min(ems_filtered$DT.DISP) - 1, south_avail)
-for(i in 1:nrow(ems_filtered)) {
-current_time <- ems_filtered$DT.DISP[i]
-service_duration <- ems_filtered$DT.AVAILABLE[i] - ems_filtered$DT.DISP[i]
-# Count available ambulances
-avail_Ce <- sum(central_return_times <= current_time)
-avail_So <- sum(south_return_times <= current_time)
-# Record current availability
-ems_filtered$S1_Ambulances_Central[i] <- avail_Ce
-ems_filtered$S1_Ambulances_South[i] <- avail_So
-# Check if any ambulances are available
-if(avail_Ce == 0 & avail_So == 0) {
-# NO AMBULANCES AVAILABLE - wait for next one
-next_central <- min(central_return_times)
-next_south <- min(south_return_times)
-if(next_central <= next_south) {
-ems_filtered$S1_Assigned_Station[i] <- "Central"
-wait_time <- next_central - current_time
-next_ambulance <- which.min(central_return_times)
-central_return_times[next_ambulance] <- next_central + service_duration
-} else {
-ems_filtered$S1_Assigned_Station[i] <- "South"
-wait_time <- next_south - current_time
-next_ambulance <- which.min(south_return_times)
-south_return_times[next_ambulance] <- next_south + service_duration
-}
-ems_filtered$S1_Delay[i] <- wait_time
-} else {# AMBULANCES AVAILABLE - assign based on travel time 
-  if(ems_filtered$eTT.Op.Ce[i] <= ems_filtered$eTT.Op.So[i] & avail_Ce > 0) {
-ems_filtered$S1_Assigned_Station[i] <- "Central"
-next_ambulance <- which(central_return_times <= current_time)[1]
-central_return_times[next_ambulance] <- current_time + service_duration
-} else if (ems_filtered$eTT.Op.So[i] < ems_filtered$eTT.Op.Ce[i] & avail_So > 0) {
-ems_filtered$S1_Assigned_Station[i] <- "South"
-next_ambulance <- which(south_return_times <= current_time)[1]
-south_return_times[next_ambulance] <- current_time + service_duration
-} else if (avail_Ce > 0) {
-ems_filtered$S1_Assigned_Station[i] <- "Central"
-next_ambulance <- which(central_return_times <= current_time)[1]
-central_return_times[next_ambulance] <- current_time + service_duration
-} else if (avail_So > 0) {
-ems_filtered$S1_Assigned_Station[i] <- "South"
-next_ambulance <- which(south_return_times <= current_time)[1]
-south_return_times[next_ambulance] <- current_time + service_duration
-}
-ems_filtered$S1_Delay[i] <- 0
-}
-}
-# Calculate S1 performance metrics
-ems_filtered$S1_Actual_Travel_Time <- ifelse(ems_filtered$S1_Assigned_Station == "Central",
-ems_filtered$eTT.Op.Ce,
-ems_filtered$eTT.Op.So)
-ems_filtered$S1_Total_Response_Time <- ems_filtered$S1_Actual_Travel_Time + 60 * ems_filtered$S1_Delay
-
-```
-
-```{r}
-# Scenario 2: Central (3) and Near North (1)
-central_avail <- 3
-nearnorth_avail <- 1
-# Initialize columns with S2_ prefix
-ems_filtered$S2_Ambulances_Central <- NA
-ems_filtered$S2_Ambulances_NearNorth <- NA
-ems_filtered$S2_Assigned_Station <- NA
-ems_filtered$S2_Delay <- 0
-# Track when each ambulance becomes available
-central_return_times <- rep(min(ems_filtered$DT.DISP) - 1, central_avail)nearnorth_return_times <- rep(min(ems_filtered$DT.DISP) - 1, nearnorth_avail)
-for
-(i
-in
-1
-:nrow(ems_filtered)) { current_time <- ems_filtered$DT.DISP[i] service_duration <- ems_filtered$DT.AVAILABLE[i] - ems_filtered$DT.DISP[i]
-# Count available ambulances
-avail_Ce <- sum(central_return_times <= current_time) avail_NN <- sum(nearnorth_return_times <= current_time)
-# Record current availability
-ems_filtered$S2_Ambulances_Central[i] <- avail_Ce 
-ems_filtered$S2_Ambulances_NearNorth[i] <- avail_NN
-# Check if any ambulances are available
-if
-(avail_Ce ==
-0
-& avail_NN ==
-0
-) {
-# NO AMBULANCES AVAILABLE - wait for next one
-next_central <- min(central_return_times) 
-next_nearnorth <- min(nearnorth_return_times)
-if
-(next_central <= next_nearnorth) { ems_filtered$S2_Assigned_Station[i] <- "Central"
-wait_time <- next_central - current_time 
-next_ambulance <- which.min(central_return_times) 
-central_return_times[next_ambulance] <- next_central + service_duration }
-else
-{ ems_filtered$S2_Assigned_Station[i] <-
-"NearNorth"
-wait_time <- next_nearnorth - current_time 
-next_ambulance <- which.min(nearnorth_return_times) 
-nearnorth_return_times[next_ambulance] <- next_nearnorth + service_duration } 
-ems_filtered$S2_Delay[i] <- wait_time }
-else
-{
-# AMBULANCES AVAILABLE - assign based on travel time
-if
-(ems_filtered$eTT.Op.Ce[i] <= ems_filtered$eTT.Op.NN[i] & avail_Ce >
-0
-) { ems_filtered$S2_Assigned_Station[i] <-
-"Central"
-next_ambulance <- which(central_return_times <= current_time)[
-1
-] central_return_times[next_ambulance] <- current_time + service_duration }
-else
-if
-(ems_filtered$eTT.Op.NN[i] < ems_filtered$eTT.Op.Ce[i] & avail_NN >
-0
-) { ems_filtered$S2_Assigned_Station[i] <-
-"NearNorth"
-next_ambulance <- which(nearnorth_return_times <= current_time)[
-1
-] nearnorth_return_times[next_ambulance] <- current_time + service_duration }
-else
-if
-(avail_Ce >
-0
-) { ems_filtered$S2_Assigned_Station[i] <-
-"Central"
-next_ambulance <- which(central_return_times <= current_time)[
-1
-] central_return_times[next_ambulance] <- current_time + service_duration }
-else
-if
-(avail_NN >
-0
-) { ems_filtered$S2_Assigned_Station[i] <-
-"NearNorth"
-next_ambulance <- which(nearnorth_return_times <= current_time)[
-1
-] nearnorth_return_times[next_ambulance] <- current_time + service_duration } ems_filtered$S2_Delay[i] <-
-0
-}}
-# Calculate S2 performance metrics
-ems_filtered$S2_Actual_Travel_Time <- ifelse(ems_filtered$S2_Assigned_Station ==
-"Central"
-, ems_filtered$eTT.Op.Ce, ems_filtered$eTT.Op.NN)ems_filtered$S2_Total_Response_Time <- ems_filtered$S2_Actual_Travel_Time +
-60* ems_filtered$S2_Delay
-```
-
-```{r}
-# Scenario 3: Central (3) and Far North (1)
-central_avail <-
-3
-farnorth_avail <-
-1
-# Initialize columns with S3_ prefix
-ems_filtered$S3_Ambulances_Central <-
-NA
-ems_filtered$S3_Ambulances_FarNorth <-
-NA
-ems_filtered$S3_Assigned_Station <-
-NA
-ems_filtered$S3_Delay <-
-0
-# Track when each ambulance becomes available
-central_return_times <- rep(min(ems_filtered$DT.DISP) -
-1
-, central_avail)farnorth_return_times <- rep(min(ems_filtered$DT.DISP) -
-1
-, farnorth_avail)
-for
-(i
-in
-1
-:nrow(ems_filtered)) { current_time <- ems_filtered$DT.DISP[i] service_duration <- ems_filtered$DT.AVAILABLE[i] - ems_filtered$DT.DISP[i]
-# Count available ambulances
-avail_Ce <- sum(central_return_times <= current_time) avail_FN <- sum(farnorth_return_times <= current_time)
-# Record current availability
-ems_filtered$S3_Ambulances_Central[i] <- avail_Ce ems_filtered$S3_Ambulances_FarNorth[i] <- avail_FN
-# Check if any ambulances are available
-if
-(avail_Ce ==
-0
-& avail_FN ==
-0
-) {
-# NO AMBULANCES AVAILABLE - wait for next one
-next_central <- min(central_return_times) next_farnorth <- min(farnorth_return_times)
-if
-(next_central <= next_farnorth) { ems_filtered$S3_Assigned_Station[i] <-
-"Central"
-wait_time <- next_central - current_time next_ambulance <- which.min(central_return_times) central_return_times[next_ambulance] <- next_central + service_duration }
-else
-{ ems_filtered$S3_Assigned_Station[i] <-
-"FarNorth"
-wait_time <- next_farnorth - current_time next_ambulance <- which.min(farnorth_return_times) farnorth_return_times[next_ambulance] <- next_farnorth + service_duration } ems_filtered$S3_Delay[i] <- wait_time }
-else
-{
-# AMBULANCES AVAILABLE - assign based on travel time
-if
-(ems_filtered$eTT.Op.Ce[i] <= ems_filtered$eTT.Op.FN[i] & avail_Ce >
-0
-) { ems_filtered$S3_Assigned_Station[i] <-
-"Central"
-next_ambulance <- which(central_return_times <= current_time)[
-1
-] central_return_times[next_ambulance] <- current_time + service_duration }
-else
-if
-(ems_filtered$eTT.Op.FN[i] < ems_filtered$eTT.Op.Ce[i] & avail_FN >
-0
-) { ems_filtered$S3_Assigned_Station[i] <-
-"FarNorth"
-next_ambulance <- which(farnorth_return_times <= current_time)[
-1
-] farnorth_return_times[next_ambulance] <- current_time + service_duration }
-else
-if
-(avail_Ce >
-0
-) { ems_filtered$S3_Assigned_Station[i] <-
-"Central"
-next_ambulance <- which(central_return_times <= current_time)[
-1
-] central_return_times[next_ambulance] <- current_time + service_duration }
-else
-if
-(avail_FN >
-0
-) { ems_filtered$S3_Assigned_Station[i] <-
-"FarNorth"
-next_ambulance <- which(farnorth_return_times <= current_time)[
-1
-] farnorth_return_times[next_ambulance] <- current_time + service_duration } ems_filtered$S3_Delay[i] <-
-0
-}}
-# Calculate S3 performance metrics
-ems_filtered$S3_Actual_Travel_Time <- ifelse(ems_filtered$S3_Assigned_Station ==
-"Central"
-, ems_filtered$eTT.Op.Ce, ems_filtered$eTT.Op.FN)ems_filtered$S3_Total_Response_Time <- ems_filtered$S3_Actual_Travel_Time +
-60* ems_filtered$S3_Delay
-```
-
