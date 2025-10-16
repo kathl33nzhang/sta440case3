@@ -584,7 +584,7 @@ m2 <- lme(
 summary(m2)
 ```
 
-`DISPATCH.PRIORITY.NAME` appears to be insignificant. We re=model after dropping the variable.
+`DISPATCH.PRIORITY.NAME` appears to be insignificant. We re-model after dropping the variable.
 
 ```{r}
 scenario_means_long <- ems_model %>%
@@ -762,7 +762,7 @@ dat_used <- nlme::getData(m4)
 tol <- 1e-9  # tolerance for "zero"
 
 model_data <- data.frame(
-  Fitted      = as.numeric(fitted(m4, level = 0)),               # population-level fit
+  Fitted      = as.numeric(fitted(m4, level = 1)),               # group-level fit
   Residuals   = as.numeric(resid(m4, type = "normalized")),      # better w/ varIdent
   Incident_ID = dat_used$Incident_ID                             # aligned IDs
 ) %>%
@@ -772,7 +772,7 @@ residual_plot <- ggplot(model_data, aes(x = Fitted, y = Residuals)) +
   geom_point(alpha = 0.6, size = 1.5) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5) +
   labs(
-    title = "Residuals vs. Fitted Values (zeros dropped)",
+    title = "Residuals vs. Fitted Values",
     x = "Fitted Values",
     y = "Normalized Residuals"
   ) +
@@ -880,3 +880,34 @@ decision_table <- emm_tbl %>%
 decision_table
 
 ```
+
+## VISUALIZATIONS
+```{r}
+ggplot(ems_model, aes(y = Scenario, x = sim_time)) +
+  geom_boxplot(outlier.alpha = 0.25, width = 0.6, color = "gray30", fill = "white") +
+  scale_x_continuous(
+    # CHANGE 1: Update the axis title to reflect minutes
+    "Total Response Time (minutes)",
+    # CHANGE 2: Set breaks in seconds (e.g., every 5 minutes = 300 seconds)
+    # Using a range up to 2000 seconds (your maximum)
+    breaks = seq(0, 2000, 150),
+    # CHANGE 3: Convert the seconds (x) to minutes for the label display
+    labels = function(x) round(x / 60, 1) # Divide by 60 and round to 1 decimal place
+  ) +
+  labs(
+    title = "Response Time Distributions by Scenario",
+    subtitle = "Distribution of total (travel + wait) response time per scenario",
+    y = "Scenario"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank(),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    axis.title.x = element_text(face = "bold", margin = margin(t = 8)),
+    axis.title.y = element_text(face = "bold", margin = margin(r = 8))
+  )
+```
+
