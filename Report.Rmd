@@ -1,5 +1,205 @@
 ---
-title: "Report"
-output: html_document
+title: "Vance County EMS Station Analysis Report"
+author: "Alayna Binder, Cindy Ju, Kathleen Zhang"
+date: "2025-10-21"
+output: 
+  bookdown::pdf_document2:
+    number_sections: true
+    toc: false
 ---
+
+<!-- NOTE: To reference a figure in the report body, do \@ref(fig:NameOfFig). -->
+
+# Background
+
+Without an effective distribution of emergency medical resources, counties risk delayed response times that can mean the difference between life and death. To improve coverage across Vance County, researchers analyzed data from the county’s EMS system, which currently operates four ambulances from two stations located in the Central and South districts. Historical records show that residents in the North district face much longer response times, often averaging over 12 minutes, compared to 6 and 9 minutes in the Central and South regions.
+
+Using a dataset of recorded EMS trips containing call locations, dispatch and arrival times, and Google API travel estimates, this analysis evaluates how different station configurations and vehicle allocations affect system performance. The county is considering establishing a new station in the North district, with two potential site options (Near North and Far North), and several ambulance distribution scenarios.
+
+Our goal is to determine which North station location would most effectively reduce response times and how the four available ambulances should be allocated among the stations to balance coverage and minimize system strain. We aim to illustrate this through visual and numerical summaries that highlight tradeoffs in travel time and resource availability across the scenarios.
+
+## The Data
+
+<!-- Talk about Duke Hospital outlier removed, how we handled NAs, etc. -->
+
+## Exploratory Data Analysis
+
+
+
+# Our Model
+
+## Model rationale
+
+
+
+## Model implementation and evaluation
+
+
+
+## Model results
+
+
+
+# Shortcomings and Future Work
+
+
+
+# Conclusion
+
+
+
+\newpage
+
+# Appendix
+
+## Tables and Figures
+
+<!-- Make sure to caption all tables/figures. -->
+
+```{r echo = FALSE, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(ggrepel)
+library(xtable)
+
+load("emsData.RData")
+
+ems <- x |>
+  select(-c( # remove unneeded columns
+    eTT.Pe.So, eTT.Pe.Ce, eTT.Pe.NN, eTT.Pe.FN,
+    eTT.BG.So, eTT.BG.Ce, eTT.BG.NN, eTT.BG.FN,
+    eTT.Op.So, eTT.Op.Ce, eTT.Op.NN, eTT.Op.FN
+  )) |>
+  mutate(
+    BASE.NAME = recode(BASE.NAME,
+                       "Company 9" = "Central",
+                       "Company 1" = "South"),
+    BASE.NAME = factor(BASE.NAME, levels = c("Central","South")),
+    REF.GRID = case_when(
+      str_detect(REF.GRID, "North")   ~ "North",
+      str_detect(REF.GRID, "Central") ~ "Central",
+      str_detect(REF.GRID, "South")   ~ "South",
+      TRUE ~ REF.GRID
+    ),
+    REF.GRID = factor(REF.GRID, levels = c("South","Central","North")),
+    DISPATCH.PRIORITY.NAME = recode(DISPATCH.PRIORITY.NAME,
+                                    "Non Emergency" = "Non-emergency",
+                                    "Emergency" = "Emergency"),
+    DISPATCH.PRIORITY.NAME = factor(DISPATCH.PRIORITY.NAME,
+                                    levels = c("Emergency","Non-emergency")),
+    went_hospital = REC.NAME != ""
+  ) |>
+  mutate(
+    disp_to_enroute_min = as.numeric(timeToEnroute, units = "mins"),
+    response_time_min = as.numeric(observedTT,    units = "mins"),
+    on_scene_min = as.numeric(onSceneDur,    units = "mins"),
+    to_hospital_min = as.numeric(toHospitalTT,  units = "mins"),
+    at_hospital_min = as.numeric(atHospitalDur, units = "mins"),
+    total_call_min = as.numeric(dispToClearTime, units = "mins")
+  )
+```
+
+```{r label = "eda1", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "EMS call density across Vance County (geographically)", fig.show = 'hold'}
+
+ems_plot <- data.frame(
+  lon = as.numeric(x$REF.GPS.LON),
+  lat = as.numeric(x$REF.GPS.LAT)
+) |> na.omit() |>
+  subset(lon > -78.55 & lon < -78.25 & lat > 36.15 & lat < 36.55)
+
+stations <- data.frame(
+  name = c("South","Central"),
+  lat  = c(36.2765, 36.3450),
+  lon  = c(-78.4004, -78.3905)
+)
+
+stations <- data.frame(
+  name = c("South","Central"),
+  lat  = c(36.2765, 36.3450),
+  lon  = c(-78.4004, -78.3905)
+)
+
+ggplot(ems_plot, aes(lon, lat)) +
+  # hex bins look nicer than squares
+  geom_hex(bins = 35, alpha = 0.95) +
+  coord_fixed() +
+  scale_fill_viridis_c(trans = "sqrt", name = "Calls") +
+  # stations: clearer markers + labels
+  geom_point(data = stations, aes(lon, lat),
+             inherit.aes = FALSE, shape = 21, size = 3.8,
+             stroke = 1, colour = "black", fill = "white") +
+  geom_label_repel(data = stations, aes(lon, lat, label = name),
+                   inherit.aes = FALSE, size = 3,
+                   label.padding = unit(0.12, "lines"),
+                   label.size = 0, seed = 1) +
+  labs(title = "EMS call density",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(face = "bold", size = 16),
+    legend.key.height = unit(0.6, "cm")
+  )
+```
+
+\newpage
+
+```{r label = "eda2_1", echo = FALSE, warning = FALSE, message = FALSE, fig.show = 'hold'}
+
+ems <- ems |>
+  mutate(
+    closest_current = if_else(eTT.UA.Ce <= eTT.UA.So, "Central", "South"),
+    closest_current = factor(closest_current, levels = c("South","Central")),
+    closer_north = case_when(
+      !is.na(eTT.UA.NN) & !is.na(eTT.UA.FN) & eTT.UA.NN <= eTT.UA.FN ~ "Near North",
+      !is.na(eTT.UA.NN) & !is.na(eTT.UA.FN) & eTT.UA.NN >  eTT.UA.FN ~ "Far North",
+      TRUE ~ NA_character_
+    ),
+    closer_north = factor(closer_north, levels = c("Near North","Far North"))
+  )
+
+# how often Near vs Far is closer for North calls
+north_choice <- ems |>
+  filter(REF.GRID == "North") |>
+  count(closer_north) |>
+  mutate(pct = n / sum(n))
+
+xtable(north_choice,
+       caption = "Proportion of North incidents closer to each proposed North station",
+       label = "tab:north_choice") |>
+  xtable2kable()
+```
+
+```{r label = "eda2_2", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "test", fig.show = 'hold'}
+
+ems %>%
+  filter(REF.GRID == "North") %>%
+  select(closer_north, response_time_min, to_hospital_min, total_call_min) %>%
+  pivot_longer(-closer_north, names_to = "stage", values_to = "minutes") %>%
+  mutate(stage = recode(stage,
+                        response_time_min = "Response Time",
+                        to_hospital_min   = "Transport to Hospital",
+                        total_call_min    = "Total Call Duration")) %>%
+  ggplot(aes(x = closer_north, y = minutes, fill = closer_north)) +
+  geom_boxplot(width = 0.6, outlier.alpha = 0.15) +
+  facet_wrap(~ stage, scales = "free_y", nrow = 1) +
+  scale_fill_manual(values = c("Near North" = "#1f77b4",
+                               "Far North"  = "#ff7f0e")) +
+  labs(
+    x = NULL, 
+    y = "Minutes", 
+    title = "North Calls: Near vs. Far North"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "top",
+    legend.title = element_blank(),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey40")
+  )
+```
+
+```{r label = "eda3", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "", fig.show = 'hold'}
+
+```
 
