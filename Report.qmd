@@ -1,0 +1,59 @@
+---
+title: "Vance County EMS Station Analysis Report"
+author: "Alayna Binder, Cindy Ju, Kathleen Zhang"
+date: "2025-10-21"
+output: 
+  bookdown::pdf_document2:
+    number_sections: true
+    toc: false
+---
+
+<!-- NOTE: To reference a figure in the report body, do \@ref(fig:NameOfFig). -->
+
+# Background
+
+Without an effective distribution of emergency medical resources, counties risk delayed response times that can mean the difference between life and death. To improve coverage across Vance County, researchers analyzed data from the county’s EMS system, which currently operates four ambulances from two stations located in the Central and Southern districts. Historical records show that residents in the Northern district face much longer response times, often averaging over 12 minutes, compared to 6 and 9 minutes in the Central and Southern regions.
+
+Using a dataset of recorded EMS trips containing call locations, dispatch and arrival times, and Google API travel estimates, this analysis evaluates how different station configurations and vehicle allocations affect system performance. The county is considering establishing a new station in the Northern district, with two potential site options (“Near North” and “Far North”), and several ambulance distribution scenarios.
+
+Our goal is to determine which northern station location would most effectively reduce response times and how the four available ambulances should be allocated among the stations to balance coverage and minimize system strain. We also aim to provide clear visual and numerical summaries that highlight tradeoffs in travel time and resource availability across the proposed configurations.
+
+## The Data
+
+
+
+## Exploratory Data Analysis
+
+
+
+# Our Model
+
+## Model rationale
+
+
+
+## Model implementation and evaluation
+
+
+
+## Model results
+
+
+
+# Shortcomings and Future Work
+
+
+
+# Conclusion
+
+
+
+\newpage
+
+# Appendix
+
+## Tables and Figures
+
+```{r label = "NameOfFig", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "INSERT CAPTION HERE", fig.show = 'hold'}
+
+```
