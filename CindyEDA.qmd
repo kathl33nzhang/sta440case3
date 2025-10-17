@@ -221,7 +221,7 @@ plot_daily_timeline_stacked <- function(data, target_date) {
       x = "Time of Day",
       y = "Call # (stacked)",
       color = "Region",
-      caption = "Thick, faint band = padded window (±15m). Thin, vivid band = actual call."
+      caption = "Thick, faint band = padded window (±15m). Thin, solid band = actual call."
     ) +
     scale_x_datetime(
       limits = c(x_min, x_max),
@@ -263,6 +263,7 @@ plot_daily_timeline_stacked <- function(data, target_date) {
 # Example:
 plot_daily_timeline_stacked(ems_clean, "2024-01-16")
 ```
+
 ```{r}
 concurrency_results |>
   ggplot(aes(x = max_concurrency)) +
@@ -275,6 +276,7 @@ concurrency_central <- concurrency_results |>
 
 mean(concurrency_central$overburdened)
 ```
+
 ```{r}
 library(dplyr)
 library(tidyr)
@@ -297,7 +299,6 @@ ggplot(counts, aes(x = factor(max_concurrency), y = n, fill = region)) +
   theme_minimal()
 
 ```
-
 
 ```{r}
 library(dplyr)
@@ -345,7 +346,3 @@ nrow(filter(north_with_counts, central_overlap_count > 2)) / nrow(north_with_cou
 ggplot(north_with_counts, aes(x = central_overlap_count)) +
   geom_histogram()
 ```
-
-
-
-

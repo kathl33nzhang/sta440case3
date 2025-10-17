@@ -1,0 +1,834 @@
+---
+title: "CindyAnalysis"
+format: pdf
+---
+
+```{r message=F}
+rm(list = ls())
+library(tidyverse)
+library(nlme)
+library(sf)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(tibble)
+set.seed(440)
+
+load("emsData.RData")
+```
+
+## PREPPING EMS
+```{r}
+ems <- x %>%
+  mutate(Incident_ID = as.character(rownames(.)))
+```
+
+```{r}
+ems <- ems |>
+  dplyr::arrange(DT.DISP, DT.AVAILABLE, BASE.NAME, Incident_ID) |>
+  dplyr::distinct(Incident_ID, .keep_all = TRUE)
+```
+
+```{r}
+ems <- ems |>
+  group_by(DT.DISP, BASE.NAME) |>
+  mutate(
+    Incident_ID = cur_group_id(),
+    Patient_Count = n()
+  ) |>
+  slice(1) |>
+  ungroup()
+```
+
+## MAKING SIMPLIFIED EMS
+
+```{r}
+ems_simplified <- ems |>
+  mutate(
+    actual_travel_time = as.numeric(DT.ARRIVE - DT.DISP)
+  ) |>
+  select(Incident_ID, REF.GRID, DISPATCH.PRIORITY.NAME, REF.GPS.LAT, REF.GPS.LON, VEHCGPS, actual_travel_time) |>
+  # split "VEHCGPS" ("36.345, -78.3905") into numeric lat/lon
+  separate(VEHCGPS, into = c("VEH.GPS.LAT", "VEH.GPS.LON"), sep = ",", convert = TRUE) %>%
+  mutate(
+    VEH.GPS.LAT = as.numeric(trimws(VEH.GPS.LAT)),
+    VEH.GPS.LON = as.numeric(trimws(VEH.GPS.LON)),
+    # simple Euclidean distance in degrees
+    distance = sqrt((REF.GPS.LAT - VEH.GPS.LAT)^2 + (REF.GPS.LON - VEH.GPS.LON)^2)
+  ) |>
+  filter(REF.GPS.LON > -78.7)
+```
+
+```{r}
+# Input: your points (already made above)
+ems_pts = st_as_sf(ems_simplified, coords = c("REF.GPS.LON","REF.GPS.LAT"), crs = 4326)
+
+# ---- PARAMETERS ----
+max_calls     <- 50      # split if a cell has > max_calls
+cellsize_init <- 0.1    # starting cell size in degrees (your 0.1)
+min_cellsize  <- 0.04   # don't split smaller than this (deg)
+max_depth     <- 4      # safety guard against runaway splitting
+# --------------------
+
+# pull numeric lon/lat (x=lon, y=lat) for fast box tests
+xy <- st_coordinates(ems_pts)
+x  <- xy[,1]
+y  <- xy[,2]
+
+# build initial grid bounds to cover data with ~cellsize_init cells
+bb   <- st_bbox(ems_pts)
+xspan <- as.numeric(bb["xmax"] - bb["xmin"])
+yspan <- as.numeric(bb["ymax"] - bb["ymin"])
+
+nx <- max(1L, ceiling(xspan / cellsize_init))
+ny <- max(1L, ceiling(yspan / cellsize_init))
+
+# snap bbox to a multiple of cellsize_init so we get tidy rectangles
+x0 <- as.numeric(bb["xmin"])
+y0 <- as.numeric(bb["ymin"])
+x1 <- x0 + nx * cellsize_init
+y1 <- y0 + ny * cellsize_init
+
+# initial cells (rectangles) laid out on the snapped lattice
+cells <- list()
+k <- 0L
+for (i in 0:(nx-1L)) {
+  for (j in 0:(ny-1L)) {
+    k <- k + 1L
+    xmin <- x0 + i * cellsize_init
+    xmax <- xmin + cellsize_init
+    ymin <- y0 + j * cellsize_init
+    ymax <- ymin + cellsize_init
+    idx  <- which(x >= xmin & x < xmax & y >= ymin & y < ymax)
+    cells[[k]] <- list(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax,
+                       idx=idx, depth=0L)
+  }
+}
+
+# quadtree refine loop (split any overfull cell)
+leaves <- list()
+queue  <- cells
+cells  <- NULL
+
+while (length(queue) > 0L) {
+  node <- queue[[length(queue)]]; queue[[length(queue)]] <- NULL
+  npts <- length(node$idx)
+  width  <- node$xmax - node$xmin
+  height <- node$ymax - node$ymin
+  too_many   <- npts > max_calls
+  can_split  <- (max(width, height) > min_cellsize) && (node$depth < max_depth)
+
+  if (too_many && can_split) {
+    # split into 4 quadrants at midpoints
+    mx <- (node$xmin + node$xmax) / 2
+    my <- (node$ymin + node$ymax) / 2
+    idx <- node$idx
+
+    # assign points to quadrants by simple comparisons
+    Q1 <- idx[ x[idx] >= node$xmin & x[idx] < mx   & y[idx] >= node$ymin & y[idx] <  my ]  # SW
+    Q2 <- idx[ x[idx] >= mx        & x[idx] < node$xmax & y[idx] >= node$ymin & y[idx] <  my ]  # SE
+    Q3 <- idx[ x[idx] >= node$xmin & x[idx] < mx   & y[idx] >= my         & y[idx] <= node$ymax ]# NW
+    Q4 <- idx[ x[idx] >= mx        & x[idx] <= node$xmax & y[idx] >= my   & y[idx] <= node$ymax ]# NE
+
+    depth2 <- node$depth + 1L
+    queue[[length(queue)+1L]] <- list(xmin=node$xmin, xmax=mx, ymin=node$ymin, ymax=my, idx=Q1, depth=depth2)
+    queue[[length(queue)+1L]] <- list(xmin=mx, xmax=node$xmax, ymin=node$ymin, ymax=my, idx=Q2, depth=depth2)
+    queue[[length(queue)+1L]] <- list(xmin=node$xmin, xmax=mx, ymin=my, ymax=node$ymax, idx=Q3, depth=depth2)
+    queue[[length(queue)+1L]] <- list(xmin=mx, xmax=node$xmax, ymin=my, ymax=node$ymax, idx=Q4, depth=depth2)
+  } else {
+    leaves[[length(leaves)+1L]] <- node
+  }
+}
+
+# turn leaves into sf polygons with counts
+rect_to_poly <- function(xmin,xmax,ymin,ymax){
+  st_polygon(list(matrix(
+    c(xmin,ymin,  xmin,ymax,  xmax,ymax,  xmax,ymin,  xmin,ymin),
+    byrow=TRUE, ncol=2)))
+}
+
+polys <- lapply(leaves, function(nd) rect_to_poly(nd$xmin, nd$xmax, nd$ymin, nd$ymax))
+sectors <- st_sf(
+  sector_id = paste0("Q", seq_along(leaves)),
+  n_calls   = vapply(leaves, function(nd) length(nd$idx), integer(1)),
+  depth     = vapply(leaves, function(nd) nd$depth, integer(1)),
+  geometry  = st_sfc(polys, crs = 4326)
+)
+```
+
+
+```{r}
+# ems_pts: points from REF.GPS (crs = 4326)
+# sectors: quadtree polygons with columns sector_id, n_calls, depth (crs = 4326)
+
+# 1) Join points to sectors (prefer "within"; fall back to nearest for edge cases)
+ems_pts_with_sector <- st_join(ems_pts, sectors["sector_id"], join = st_within)
+
+# Handle points that landed exactly on a boundary (NA after st_within)
+missing <- is.na(ems_pts_with_sector$sector_id)
+if (any(missing)) {
+  nearest_idx <- st_nearest_feature(ems_pts_with_sector[missing, ], sectors)
+  ems_pts_with_sector$sector_id[missing] <- sectors$sector_id[nearest_idx]
+}
+
+# 2) Write sector_id back onto your original ems data.frame (same row order)
+ems_simplified$sector_id <- ems_pts_with_sector$sector_id
+
+# (optional) quick check
+table(is.na(ems_simplified$sector_id))
+head(ems_simplified$sector_id)
+```
+```{r}
+# Assumes:
+#   - sectors: sf polygons with column `sector_id` (crs = 4326)
+#   - ems_pts: sf POINTS from REF.GPS (crs = 4326)
+#   - ems has a column sector_id matching polygons
+
+# Count points per sector (from ems)
+sector_counts <- ems_simplified %>%
+  count(sector_id, name = "n_calls")
+
+# Centroids for labeling (point-on-surface ensures label inside polygon)
+label_pts <- st_point_on_surface(sectors) %>%
+  mutate(label = paste0(sector_id, "\n(n=", n_calls, ")"))
+
+north_sectors <- c("Q22", "Q12", "Q5", "Q1", "Q23", "Q13", "Q6", "Q2")
+south_sectors <- c("Q25", "Q21", "Q11", "Q4")
+```
+
+```{r}
+ems_simplified <- ems_simplified %>%
+  filter(
+    !is.na(actual_travel_time),
+    !is.na(distance),
+    !is.na(DISPATCH.PRIORITY.NAME),
+    !is.na(sector_id),
+    !is.na(REF.GRID),
+    is.finite(actual_travel_time),
+    is.finite(distance)
+  ) %>%
+  mutate(
+    DISPATCH.PRIORITY.NAME = droplevels(factor(DISPATCH.PRIORITY.NAME)),
+    sector_id              = droplevels(factor(sector_id)),
+    REF.GRID               = droplevels(factor(REF.GRID))
+  ) |>
+  mutate(
+    region = if_else(sector_id %in% north_sectors, "NORTH", if_else(sector_id %in% south_sectors, "SOUTH", "CENTRAL"))
+  )
+
+ems_pts = st_as_sf(ems_simplified, coords = c("REF.GPS.LON","REF.GPS.LAT"), crs = 4326)
+```
+
+```{r}
+m1 <- lme(
+  fixed  = actual_travel_time ~ distance + DISPATCH.PRIORITY.NAME,
+  random = ~ 1 | sector_id,
+  weights = varIdent(form = ~ 1 | region),
+  data   = ems_simplified,
+  method = "REML"
+)
+summary(m1)
+```
+
+```{r}
+# m1 is your fitted model
+sector_re <- as.data.frame(ranef(m1)) %>%
+  rownames_to_column("sector_id") %>%
+  rename(re_intercept = `(Intercept)`)
+
+# (Optional) join back to sectors for mapping or tables
+sectors_with_re <- sectors %>%
+  left_join(sector_re, by = "sector_id")
+
+stations <- data.frame(
+  name = c("Central Station", "South Station"),
+  lat  = c(36.345, 36.2765),
+  lon  = c(-78.3905, -78.4004)
+)
+stations_sf <- st_as_sf(stations, coords = c("lon", "lat"), crs = 4326)
+
+sector_labels <- st_point_on_surface(sectors) %>%
+  mutate(label = sector_id)
+
+# Plot: only boundaries + labels
+ggplot() +
+  geom_sf(data = sectors, fill = NA, color = "black", linewidth = 0.3) +
+  geom_sf_text(data = sector_labels, aes(label = label), size = 3) +
+  coord_sf(expand = FALSE) +
+  labs(
+    title = "Sector Boundaries and IDs",
+    x = "Longitude", y = "Latitude"
+  ) +
+  theme_minimal(base_size = 12)
+
+
+ggplot() +
+  geom_sf(data = sectors_with_re, aes(fill = re_intercept), color = "white", linewidth = 0.15) +
+  geom_sf_text(data = sectors_with_re, aes(label = round(re_intercept, 1)), size = 3) +
+  # add the station points
+  geom_sf(data = stations_sf, color = "red", size = 4, shape = 19) +
+  # optionally label the stations
+  geom_sf_text(data = stations_sf, aes(label = name), color = "red", nudge_y = 0.01, size = 3.5) +
+  scale_fill_viridis_c() +
+  coord_sf(expand = FALSE) +
+  labs(title = "Split Sectors with Random Effect Intercept Values",
+       fill = "RE Intercept",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# visualize
+ggplot() +
+  geom_sf(data = sectors, aes(fill = n_calls), color = "white", linewidth = 0.15) +
+  geom_sf(data = ems_pts, size = 0.3, alpha = 0.5, aes(color = region)) +
+  # add the station points
+  geom_sf(data = stations_sf, color = "red", size = 4, shape = 19) +
+  # optionally label the stations
+  geom_sf_text(data = stations_sf, aes(label = name), color = "red", nudge_y = 0.01, size = 3.5) +
+  scale_fill_viridis_c(trans = "sqrt") +
+  coord_sf(expand = FALSE) +
+  labs(title = "Split Sectors with Number of Calls Per Cell",
+       fill = "Calls / cell",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+```{r}
+# data actually used by the model (guaranteed to line up with fitted/residuals)
+ems_used <- getData(m1)
+
+diag_df <- tibble(
+  fitted    = fitted(m1),
+  resid_raw = residuals(m1, type = "response"),    # in seconds
+  resid_norm= residuals(m1, type = "normalized"),  # standardized (use these)
+  region    = ems_used$region,
+  sector_id = ems_used$sector_id,
+  observed  = ems_used$actual_travel_time,
+)
+
+# 1) Residuals vs fitted
+ggplot(diag_df, aes(fitted, resid_norm)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, color = "red") +
+  labs(title = "Residuals vs Fitted", x = "Fitted (s)", y = "Normalized residuals") +
+  theme_minimal(12)
+
+# 2) QQ plot of residuals
+qqnorm(diag_df$resid_norm); qqline(diag_df$resid_norm, col = "red", lwd = 2)
+
+# 3) QQ plot of random intercepts
+re_sec <- as.data.frame(ranef(m1))$`(Intercept)`
+qqnorm(re_sec, main = "QQ: Sector random intercepts")
+qqline(re_sec, col = "red", lwd = 2)
+```
+
+
+
+## SIMULATIONS
+
+```{r}
+eta_col_for <- function(station) {
+  switch(station,
+    "Central"   = "eTT.BG.Ce",
+    "South"     = "eTT.BG.So",
+    "NearNorth" = "eTT.BG.NN",
+    "FarNorth"  = "eTT.BG.FN",
+    stop(sprintf("Unknown station: %s", station))
+  )
+}
+
+# safer difftime in seconds
+sec_between <- function(a, b) {
+  as.numeric(difftime(a, b, units = "secs"))
+}
+
+# Core simulator: queue + assign shortest ETA among available units
+simulate_dispatch <- function(dat, units_vec_named) {
+  # dat must contain: Incident_ID, DT.DISP, DT.AVAILABLE, ETA columns used by stations
+  if (is.null(names(units_vec_named)) || anyNA(names(units_vec_named))) {
+    stop("`units_vec_named` must be a *named* numeric vector, e.g. c(Central=3, South=1).")
+  }
+  if (sum(units_vec_named) <= 0) stop("No units in scenario.")
+
+  # Order incidents deterministically
+  dat <- dat[order(dat$DT.DISP, dat$DT.AVAILABLE, dat$Incident_ID), ]
+  rownames(dat) <- NULL
+
+  # Build fleet frame: one row per ambulance
+  stations <- rep(names(units_vec_named), times = as.integer(units_vec_named))
+  unit_idx <- ave(seq_along(stations), stations, FUN = seq_along)
+  fleet <- data.frame(
+    station   = stations,
+    unit_id   = paste0(stations, "_", unit_idx),
+    next_free = min(dat$DT.DISP, na.rm = TRUE) - 1,   # all free just before first call
+    stringsAsFactors = FALSE
+  )
+
+  # Output containers
+  n <- nrow(dat)
+  out_station <- character(n)
+  out_unit    <- character(n)
+  out_wait    <- numeric(n)
+  out_travel  <- numeric(n)
+
+  # Sim loop
+  for (i in seq_len(n)) {
+    t_call <- dat$DT.DISP[i]
+    if (is.na(t_call)) next
+
+    # service duration as observed (dispatch -> available)
+    svc <- sec_between(dat$DT.AVAILABLE[i], dat$DT.DISP[i])
+    if (!is.finite(svc) || svc < 0) svc <- 0
+
+    # per-unit ETA to this call
+    eta_cols <- vapply(fleet$station, eta_col_for, character(1))
+    eta_vals <- vapply(eta_cols, function(col) {
+      if (!col %in% names(dat)) return(Inf)
+      v <- dat[[col]][i]
+      if (is.na(v)) Inf else as.numeric(v)   # assume ETAs already in seconds
+    }, numeric(1))
+
+    available_now <- fleet$next_free <= t_call
+    available_now[is.na(available_now)] <- FALSE
+
+    if (any(available_now)) {
+      # choose among free units by minimal ETA (if all Inf, take the first free)
+      idx_free <- which(available_now)
+      best_idx <- if (any(is.finite(eta_vals[idx_free]))) {
+        idx_free[ which.min(eta_vals[idx_free]) ]
+      } else {
+        idx_free[1]
+      }
+      wait_s   <- 0
+      travel_s <- if (is.finite(eta_vals[best_idx])) eta_vals[best_idx] else 0
+      depart   <- t_call
+    } else {
+      # nobody free: take earliest to free; waiting starts until that moment
+      soonest  <- which.min(fleet$next_free)
+      depart   <- fleet$next_free[soonest]
+      wait_s   <- sec_between(depart, t_call)
+      travel_s <- if (is.finite(eta_vals[soonest])) eta_vals[soonest] else 0
+      best_idx <- soonest
+    }
+
+    # update busy time (use observed svc; do NOT add travel again to svc)
+    fleet$next_free[best_idx] <- depart + wait_s + svc
+
+    # record
+    out_station[i] <- fleet$station[best_idx]
+    out_unit[i]    <- fleet$unit_id[best_idx]
+    out_wait[i]    <- wait_s
+    out_travel[i]  <- travel_s
+  }
+
+  tibble::tibble(
+    Incident_ID   = dat$Incident_ID,
+    assigned_unit = out_unit,
+    assigned_from = out_station,
+    wait_secs     = out_wait,
+    travel_secs   = out_travel,
+    sim_time      = out_wait + out_travel   # dispatch→arrival + queue delay
+  )
+}
+```
+
+```{r}
+# Ensure required columns exist in `ems`
+stopifnot(all(c("Incident_ID","DT.DISP","DT.AVAILABLE") %in% names(ems)))
+
+# If your ETA fields are in minutes or some other unit, convert them to seconds first.
+# Example (uncomment if needed):
+# for (nm in c("eTT.Op.Ce","eTT.Op.So","eTT.Op.NN","eTT.Op.FN")) {
+#   if (nm %in% names(ems)) ems[[nm]] <- as.numeric(ems[[nm]])  # assume already seconds
+# }
+
+# Scenario set (adjust counts as needed)
+scenario_defs <- list(
+  S0 = c(Central = 3, South     = 1),
+  S1 = c(Central = 3, NearNorth = 1),
+  S2 = c(Central = 3, FarNorth  = 1),
+  S3 = c(Central = 2, NearNorth = 1, South = 1),
+  S4 = c(Central = 2, FarNorth  = 1, South = 1)
+)
+
+# Run every scenario on the full `ems` (original dataset)
+sim_by_scenario <- imap_dfr(
+  scenario_defs,
+  ~ simulate_dispatch(ems, .x) %>% mutate(Scenario = .y),
+  .id = NULL
+)
+
+# Keep plausible simulated responses (e.g., under ~33 minutes = 2000s), like your filter
+sim_by_scenario <- sim_by_scenario %>%
+  filter(is.finite(sim_time), sim_time >= 0, sim_time < 2000)
+
+# Merge simulated scenario rows into your modeling frame `ems_simplified`
+# Result: one row per Incident_ID x Scenario with sim_time + your modeling covariates
+ems_simplified <- sim_by_scenario %>%
+  left_join(ems_simplified, by = "Incident_ID") %>%
+  relocate(Incident_ID, Scenario, sim_time, .before = dplyr::everything())
+```
+
+```{r}
+
+# --- Helper to get the original station from `ems`
+derive_orig_station <- function(ems) {
+  if ("original_assignment" %in% names(ems)) {
+    ems %>%
+      transmute(Incident_ID, orig_station = as.character(original_assignment))
+  } else if ("BASE.NAME" %in% names(ems)) {
+    # Adjust this mapping to your system:
+    # Example: Company 9 = Central, everything else = South
+    ems %>%
+      transmute(
+        Incident_ID,
+        orig_station = case_when(
+          BASE.NAME == "Company 9" ~ "Central",
+          TRUE ~ "South"
+        )
+      )
+  } else {
+    stop("Need either `original_assignment` or `BASE.NAME` in `ems` to derive original station.")
+  }
+}
+
+# Ensure character Incident_ID in both frames
+ems_simplified <- ems_simplified %>% mutate(Incident_ID = as.character(Incident_ID))
+
+# 1) If an S0 baseline scenario exists, compare to that
+if ("Scenario" %in% names(ems_simplified) &&
+    any(ems_simplified$Scenario == "S0", na.rm = TRUE)) {
+
+  baseline <- ems_simplified %>%
+    filter(Scenario == "S0") %>%
+    select(Incident_ID, base_assigned_from = assigned_from)
+
+  ems_simplified <- ems_simplified %>%
+    left_join(baseline, by = "Incident_ID") %>%
+    mutate(
+      switched = !is.na(assigned_from) & !is.na(base_assigned_from) &
+                 assigned_from != base_assigned_from
+    )
+
+} else {
+  # 2) Else compare to original station derived from `ems`
+  # Make sure ems has Incident_ID already (as you did earlier)
+  ems <- ems %>% mutate(Incident_ID = as.character(Incident_ID))
+  orig <- derive_orig_station(ems) %>% distinct(Incident_ID, .keep_all = TRUE)
+
+  ems_simplified <- ems_simplified %>%
+    left_join(orig, by = "Incident_ID") %>%
+    mutate(
+      switched = !is.na(assigned_from) & !is.na(orig_station) &
+                 assigned_from != orig_station
+    )
+}
+```
+
+```{r}
+# some ambulances dont go to patient scene and are missing data, we won't
+# consider them in our model
+ems_model <- ems_simplified %>%
+  mutate(
+    Scenario = as.factor(Scenario),
+    region   = as.factor(region),
+    DISPATCH.PRIORITY.NAME = as.factor(DISPATCH.PRIORITY.NAME)
+  ) %>%
+  filter(
+    is.finite(sim_time),
+    !is.na(Scenario),
+    !is.na(DISPATCH.PRIORITY.NAME),
+    !is.na(region),
+    !is.na(Incident_ID)
+  ) %>%
+  droplevels()
+
+ems_model <- ems_model %>%
+  mutate(DISPATCH.PRIORITY.NAME = relevel(factor(DISPATCH.PRIORITY.NAME),
+                                          ref = "Non Emergency"))
+```
+
+```{r}
+summ_tbl <- ems_model %>%
+  group_by(Scenario) %>%
+  summarise(
+    n               = n(),
+    mean_resp_s     = mean(sim_time),
+    median_resp_s   = median(sim_time),
+    p90_resp_s      = quantile(sim_time, 0.90),
+    p95_resp_s      = quantile(sim_time, 0.95),
+    pct_under_8min  = mean(sim_time <= 8*60),
+    pct_under_10min = mean(sim_time <= 10*60),
+    .groups = "drop"
+  ) %>%
+  arrange(mean_resp_s)
+
+print(summ_tbl)
+```
+
+## MODELLING
+```{r}
+m2 <- lme(
+  fixed  = sim_time ~ Scenario + DISPATCH.PRIORITY.NAME,
+  random = ~ 1 | Incident_ID,
+  weights = varIdent(form = ~ 1 | region),
+  data   = ems_model,
+  method = "REML"
+)
+
+summary(m2)
+```
+
+`DISPATCH.PRIORITY.NAME` appears to be insignificant. We re-model after dropping the variable.
+
+```{r}
+scenario_means_long <- ems_model %>%
+  # Group the data by the 'Scenario' variable
+  group_by(Scenario) %>%
+  # Calculate the mean of the simulated response time ('sim_time') within each group
+  summarise(
+    Mean_Response_Time = mean(sim_time, na.rm = TRUE),
+    .groups = 'drop' # Ungroup after summarising
+  )
+```
+
+
+```{r}
+ems_model <- ems_model %>%
+  filter(sim_time < 2000)
+```
+
+
+```{r}
+m3 <- lme(
+  fixed  = sim_time ~ Scenario,
+  random = ~ 1 | Incident_ID,
+  weights = varIdent(form = ~ 1 | Scenario),
+  data   = ems_model,
+  method = "REML"
+)
+
+summary(m3)
+```
+This actually resulted in slightly higher AIC and BIC values than our previous model.
+
+
+## RESIDUAL PLOTS
+
+```{r}
+# --- STEP 1: Identify all Incident_IDs that ever switched ---
+# This creates a vector of Incident_IDs where 'switched' is "TRUE" at least once.
+red_incident_ids <- ems_model %>%
+  filter(switched == "TRUE") %>%
+  distinct(Incident_ID) %>%
+  pull(Incident_ID)
+
+# --- STEP 2 & 3: Create the plot data frame and flag the points ---
+
+# Create a data frame combining the model results and the original Incident_ID
+model_data <- data.frame(
+  Fitted = fitted(m3),       # Fitted values from the LME model
+  Residuals = resid(m3),     # Residuals from the LME model
+  Incident_ID = ems_model$Incident_ID # Get the Incident_ID in the same order
+)
+
+# Create the coloring variable
+model_data <- model_data %>%
+  mutate(
+    # Check if the Incident_ID is in the list of 'red_incident_ids'
+    ColorGroup = ifelse(Incident_ID %in% red_incident_ids, "Switched_TRUE", "Switched_FALSE")
+  )
+
+# --- STEP 4: Create the ggplot plot with coloring ---
+residual_plot_colored <- ggplot(model_data, aes(x = Fitted, y = Residuals, color = ColorGroup)) +
+  # Add points, colored by the new variable
+  geom_point(alpha = 0.6, size = 1.5) +
+  # Add a horizontal line at y=0 for reference
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5) +
+  # Manually set colors: ensuring 'Switched_TRUE' is red
+  scale_color_manual(
+    values = c("Switched_TRUE" = "red", "Switched_FALSE" = "black"),
+    labels = c("Switched_TRUE" = "Incident Switched (Red)", "Switched_FALSE" = "Incident Did Not Switch (Black)")
+  ) +
+  # Set the plot title and axis labels
+  labs(
+    title = "Residuals vs. Fitted Values Plot (Colored by Incident Switch Status)",
+    x = "Fitted Values",
+    y = "Residuals",
+    color = "Incident Status" # Legend title
+  ) +
+  # Apply a clean theme and position the legend
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Display the plot
+print(residual_plot_colored)
+
+model_used <- getData(m3)
+
+diag_df <- tibble(
+  fitted    = fitted(m3),
+  resid_raw = residuals(m3, type = "response"),    # in seconds
+  resid_norm= residuals(m3, type = "normalized"),  # standardized (use these)
+  Scenario  = model_used$Scenario,
+  region    = model_used$region,
+  sector_id = model_used$sector_id,
+  observed  = model_used$sim_time,
+)
+
+diag_df_filtered <- diag_df %>%
+  filter(resid_raw != 0)
+
+# 2) QQ plot of residuals
+qqnorm(diag_df_filtered$resid_norm); qqline(diag_df_filtered$resid_norm, col = "red", lwd = 2)
+
+# 3) QQ plot of random intercepts
+re_sec <- as.data.frame(ranef(m1))$`(Intercept)`
+qqnorm(re_sec, main = "QQ: Sector random intercepts")
+qqline(re_sec, col = "red", lwd = 2)
+```
+Many of our residuals are clustered around 0.
+
+```{r}
+dropped_ems_model <- ems_model |>
+  group_by(Incident_ID) |>
+  # Keep the group if the number of distinct simulated times is greater than 1
+  filter(n_distinct(sim_time) > 1) |>
+  ungroup()
+```
+
+```{r}
+summ_tbl <- dropped_ems_model %>%
+  group_by(Scenario) %>%
+  summarise(
+    n               = n(),
+    mean_resp_s     = mean(sim_time),
+    median_resp_s   = median(sim_time),
+    p90_resp_s      = quantile(sim_time, 0.90),
+    p95_resp_s      = quantile(sim_time, 0.95),
+    pct_under_8min  = mean(sim_time <= 8*60),
+    pct_under_10min = mean(sim_time <= 10*60),
+    .groups = "drop"
+  ) %>%
+  arrange(mean_resp_s)
+
+print(summ_tbl)
+```
+
+
+```{r}
+m4 <- lme(
+  fixed  = sim_time ~ Scenario,
+  random = ~ 1 | Incident_ID,
+  weights = varIdent(form = ~ 1 | Scenario),
+  data   = dropped_ems_model,
+  method = "REML"
+)
+
+summary(m4)
+```
+
+
+```{r}
+model_used <- getData(m4)
+
+diag_df <- tibble(
+  fitted    = fitted(m4),
+  resid_raw = residuals(m4, type = "response"),    # in seconds
+  resid_norm= residuals(m4, type = "normalized"),  # standardized (use these)
+  Scenario  = model_used$Scenario,
+  region    = model_used$region,
+  sector_id = model_used$sector_id,
+  observed  = model_used$sim_time,
+)
+
+# 2) QQ plot of residuals
+qqnorm(diag_df$resid_norm); qqline(diag_df$resid_norm, col = "red", lwd = 2)
+
+# 3) QQ plot of random intercepts
+re_sec <- as.data.frame(ranef(m1))$`(Intercept)`
+qqnorm(re_sec, main = "QQ: Sector random intercepts")
+qqline(re_sec, col = "red", lwd = 2)
+```
+
+```{r}
+dat_used <- nlme::getData(m4)
+
+tol <- 1e-9  # tolerance for "zero"
+
+model_data <- data.frame(
+  Fitted      = as.numeric(fitted(m4, level = 1)),               # group-level fit
+  Residuals   = as.numeric(resid(m4, type = "normalized")),      # better w/ varIdent
+  Incident_ID = dat_used$Incident_ID                             # aligned IDs
+) %>%
+  filter(!is.na(Residuals), abs(Residuals) > tol)
+
+residual_plot <- ggplot(model_data, aes(x = Fitted, y = Residuals)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5) +
+  labs(
+    title = "Residuals vs. Fitted Values",
+    x = "Fitted Values",
+    y = "Normalized Residuals"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(residual_plot)
+```
+
+```{r}
+
+plot_df <- dat_used |>
+  dplyr::mutate(
+    fit0   = as.numeric(fitted(m4, level = 0)),   # marginal (per Scenario mean)
+    fit1   = as.numeric(fitted(m4, level = 1)),   # conditional (Incident-specific)
+    r_norm = as.numeric(resid(m4, type = "normalized"))
+  )
+
+ggplot(plot_df, aes(fit1, r_norm, color = as.logical(switched))) +
+  geom_point(alpha = 0.6, size = 1.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  facet_wrap(~ Scenario) +
+  scale_color_manual(values = c("grey50","red"), na.translate = FALSE) +
+  labs(title = "Residuals vs Fitted by Scenario",
+       x = "Fitted (level = 1)", y = "Normalized residuals", color = "Switched") +
+  theme_minimal()
+```
+
+
+## VISUALIZATIONS
+```{r}
+ggplot(ems_model, aes(y = Scenario, x = sim_time)) +
+  geom_boxplot(outlier.alpha = 0.25, width = 0.6, color = "gray30", fill = "white") +
+  scale_x_continuous(
+    # CHANGE 1: Update the axis title to reflect minutes
+    "Total Response Time (minutes)",
+    # CHANGE 2: Set breaks in seconds (e.g., every 5 minutes = 300 seconds)
+    # Using a range up to 2000 seconds (your maximum)
+    breaks = seq(0, 2000, 150),
+    # CHANGE 3: Convert the seconds (x) to minutes for the label display
+    labels = function(x) round(x / 60, 1) # Divide by 60 and round to 1 decimal place
+  ) +
+  labs(
+    title = "Response Time Distributions by Scenario",
+    subtitle = "Distribution of total (travel + wait) response time per scenario",
+    y = "Scenario"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank(),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    axis.title.x = element_text(face = "bold", margin = margin(t = 8)),
+    axis.title.y = element_text(face = "bold", margin = margin(r = 8))
+  )
+```
+
