@@ -1,0 +1,262 @@
+---
+title: "CindyAnalysis"
+format: pdf
+editor: visual
+---
+
+```{r}
+# ---- 0_PACKAGES_AND_DATA ----
+# Install once if needed:
+# install.packages(c("tidyverse","lubridate","lme4","lmerTest","emmeans","broom.mixed"))
+
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(lmerTest)   # p-values for lmer
+library(emmeans)
+library(broom.mixed)
+
+load("emsData.RData")   # expects an object named `emsData`
+ems_raw <- x
+rm(x)
+
+# Inspect names to confirm eTT.* columns exist:
+names(ems_raw)
+```
+
+```{r}
+# ---- 1_CLEAN_AND_COLLAPSE_TO_CALL ----
+ems <- ems_raw %>%
+  mutate(
+    DT.DISP      = ymd_hms(DT.DISP, tz = "UTC"),
+    DT.ENROUTE   = ymd_hms(DT.ENROUTE, tz = "UTC"),
+    DT.ARRIVE    = ymd_hms(DT.ARRIVE, tz = "UTC"),
+    DT.LVREF     = ymd_hms(DT.LVREF, tz = "UTC"),
+    DT.ARVREC    = ymd_hms(DT.ARVREC, tz = "UTC"),
+    DT.AVAILABLE = ymd_hms(DT.AVAILABLE, tz = "UTC")
+  )
+
+TZ <- "America/New_York"
+
+ems_clean <- ems %>%
+  filter(!is.na(DT.DISP), !is.na(DT.AVAILABLE), !is.na(REF.GRID)) %>%
+  mutate(
+    # Normalize to a single local timezone
+    dispatch_time   = with_tz(as.POSIXct(DT.DISP, tz = TZ), tzone = TZ),
+    available_time  = with_tz(as.POSIXct(DT.AVAILABLE, tz = TZ), tzone = TZ),
+    Region          = REF.GRID
+  ) %>%
+  filter(dispatch_time < available_time)
+
+# Heuristic call key (adjust if you already have a true call ID)
+ems_calls <- ems_clean %>%
+  mutate(call_key = paste(REF.GRID, DT.DISP, DT.ENROUTE, DT.ARRIVE, DT.LVREF, DT.AVAILABLE, sep="|")) %>%
+  group_by(call_key) %>%
+  summarize(
+    across(c(REF.GRID, Region, DISPATCH.PRIORITY.NAME, REF.GPS.LAT, REF.GPS.LON,
+             BASE.NAME, VEH.GRID, VEHCGPS, REC.NAME), ~ first(.x)),
+    DT.DISP      = first(DT.DISP),
+    DT.ENROUTE   = first(DT.ENROUTE),
+    DT.ARRIVE    = first(DT.ARRIVE),
+    DT.LVREF     = first(DT.LVREF),
+    DT.ARVREC    = first(DT.ARVREC),
+    DT.AVAILABLE = first(DT.AVAILABLE),
+    n_patients   = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    resp_time_obs = as.numeric(DT.ARRIVE - DT.DISP, units="mins"),
+    busy_time     = as.numeric(DT.AVAILABLE - DT.DISP, units="mins")
+  ) %>%
+  filter(is.finite(busy_time), busy_time > 0)
+
+summary(ems_calls$busy_time)
+```
+
+```{r}
+# ---- 2_SCENARIOS ----
+# Staffing table from your screenshot
+scenario_staff <- tribble(
+  ~Scenario, ~So, ~Ce, ~NN, ~FN,
+  "S0",        1,   3,   0,   0,   # current
+  "S1",        0,   3,   1,   0,   # near north added
+  "S2",        0,   3,   0,   1,   # far north added
+  "S3",        1,   2,   1,   0,   # near north + shift from central
+  "S4",        1,   2,   0,   1    # far north + shift from central
+)
+
+# Convenience: list of which station codes are staffed per scenario
+scenario_to_staffed <- function(row) {
+  st <- c(So="So",Ce="Ce",NN="NN",FN="FN")
+  staffed <- c(if (row$So>0) "So", if (row$Ce>0) "Ce",
+               if (row$NN>0) "NN", if (row$FN>0) "FN")
+  unname(staffed[!is.na(staffed)])
+}
+```
+
+```{r}
+# ---- 3_PREDICTED_RESPONSE_TIMES ----
+# Check that these columns exist; rename below if needed.
+required_cols <- c("eTT.UA.So","eTT.UA.Ce","eTT.UA.NN","eTT.UA.FN")
+stopifnot(all(required_cols %in% names(ems)))
+
+# For each call, compute scenario-specific "closest staffed station" travel time
+compute_resp_for_scenario <- function(df, staffed_codes) {
+  # Build a matrix of candidate times limited to staffed stations
+  cand <- list(
+    So = if("So" %in% staffed_codes) df$eTT.UA.So else Inf,
+    Ce = if("Ce" %in% staffed_codes) df$eTT.UA.Ce else Inf,
+    NN = if("NN" %in% staffed_codes) df$eTT.UA.NN else Inf,
+    FN = if("FN" %in% staffed_codes) df$eTT.UA.FN else Inf
+  )
+  tibble(
+    resp_time = pmin(cand$So, cand$Ce, cand$NN, cand$FN, na.rm = TRUE),
+    chosen_station = c("So","Ce","NN","FN")[max.col(cbind(cand$So, cand$Ce, cand$NN, cand$FN),
+                                                    ties.method = "first")]
+  )
+}
+
+# Apply across S0–S4
+ems_pred <- map_dfr(seq_len(nrow(scenario_staff)), function(i) {
+  sc <- scenario_staff[i,]
+  staffed <- names(which(c(So=sc$So, Ce=sc$Ce, NN=sc$NN, FN=sc$FN) > 0))
+  tmp <- compute_resp_for_scenario(ems_calls, staffed)
+  bind_cols(ems_calls, tmp) %>%
+    mutate(Scenario = sc$Scenario)
+})
+
+# Quick sanity
+ems_pred %>% count(Scenario)
+```
+
+```{r}
+# ---- 4_LMM_RESPONSE_TIME ----
+# Make sure categorical variables are factors with nice baselines
+ems_pred <- ems_pred %>%
+  mutate(
+    Scenario = factor(Scenario, levels = c("S0","S1","S2","S3","S4")),
+    Region   = factor(Region)
+  )
+
+# Model: scenario & region fixed effects, County random intercept
+mod_resp <- lmer(resp_time ~ Scenario * Region + (1 | BASE.NAME), data = ems_pred)
+summary(mod_resp)
+
+# Marginal means by scenario within region
+emm_by_region <- emmeans(mod_resp, ~ Scenario | Region)
+emm_by_region
+pairs(emm_by_region)  # pairwise within each region
+
+# Overall (collapsed over regions, weighted by sample sizes)
+emm_overall <- emmeans(mod_resp, ~ Scenario)
+pairs(emm_overall)
+```
+
+```{r}
+# ---- 6_SYSTEM_LOAD ----
+
+# Study horizon for utilization denominator (minutes)
+study_minutes <- as.numeric(max(ems_calls$DT.AVAILABLE, na.rm = TRUE) -
+                            min(ems_calls$DT.DISP, na.rm = TRUE),
+                            units = "mins")
+
+# Join staffing counts to each scenario row, then summarize loads
+load_summary_station <- ems_pred %>%
+  left_join(scenario_staff, by = "Scenario") %>%
+  mutate(staffed_count = case_when(
+    chosen_station == "So" ~ So,
+    chosen_station == "Ce" ~ Ce,
+    chosen_station == "NN" ~ NN,
+    chosen_station == "FN" ~ FN,
+    TRUE ~ 0L
+  )) %>%
+  group_by(Scenario, chosen_station) %>%
+  summarize(
+    calls        = n(),
+    mean_busy    = mean(busy_time, na.rm = TRUE),
+    total_busy   = sum(busy_time, na.rm = TRUE),
+    num_units_at_station = first(staffed_count),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    busy_per_unit_min = if_else(num_units_at_station > 0,
+                                total_busy / num_units_at_station, NA_real_),
+    utilization_per_unit = busy_per_unit_min / study_minutes
+  )
+
+load_summary_station
+
+# A scenario-level rollup
+load_summary_scenario <- load_summary_station %>%
+  group_by(Scenario) %>%
+  summarize(
+    system_busy_per_unit_avg = mean(busy_per_unit_min, na.rm = TRUE),
+    system_utilization_avg   = mean(utilization_per_unit, na.rm = TRUE),
+    max_utilization_station  = max(utilization_per_unit, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+load_summary_scenario
+```
+
+```{r}
+# ---- 7_CLOSEST_STATION_AVAILABLE_METRIC ----
+closest_all <- ems_calls %>%
+  transmute(
+    call_key, Region,
+    closest_global = c("So","Ce","NN","FN")[max.col(cbind(eTT.So.UA, eTT.Ce.UA, eTT.NN.UA, eTT.FN.UA),
+                                                    ties.method = "first")]
+  )
+
+closest_avail <- ems_pred %>%
+  select(call_key, Scenario) %>%
+  left_join(closest_all, by = "call_key") %>%
+  left_join(ems_pred %>% select(call_key, Scenario, chosen_station),
+            by = c("call_key","Scenario")) %>%
+  mutate(closest_is_staffed = (closest_global == chosen_station)) %>%
+  group_by(Scenario) %>%
+  summarize(
+    frac_closest_staffed = mean(closest_is_staffed, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+closest_avail
+```
+
+```{r}
+# ---- 8_SUMMARY_TABLES ----
+
+# Response-time emmeans as a tidy table
+tbl_resp_region <- emm_by_region %>%
+  broom::tidy() %>%
+  select(Region, Scenario = contrast, estimate, conf.low, conf.high) %>%
+  arrange(Region, Scenario)
+
+# Per-region raw summaries (median & 90th)
+tbl_resp_raw <- ems_pred %>%
+  group_by(Scenario, Region) %>%
+  summarize(
+    n_calls  = n(),
+    mean_rt  = mean(resp_time, na.rm = TRUE),
+    med_rt   = median(resp_time, na.rm = TRUE),
+    p90_rt   = quantile(resp_time, 0.90, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Join with load and closest-available metrics
+tbl_final <- tbl_resp_raw %>%
+  group_by(Scenario) %>%
+  summarize(
+    overall_mean_rt = mean(mean_rt, na.rm = TRUE),
+    north_mean_rt   = mean_rt[Region=="North"],
+    central_mean_rt = mean_rt[Region=="Central"],
+    south_mean_rt   = mean_rt[Region=="South"],
+    .groups = "drop_last"
+  ) %>%
+  left_join(load_summary_scenario, by = "Scenario") %>%
+  left_join(closest_avail, by = "Scenario") %>%
+  arrange(Scenario)
+
+tbl_final
+```
+
