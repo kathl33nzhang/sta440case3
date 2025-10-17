@@ -8,7 +8,7 @@ output:
     toc: false
 ---
 
-<!-- NOTE: To reference a figure in the report body, do \@ref(fig:NameOfFig). -->
+<!-- NOTE: To reference a figure in the report body, do @ref(fig:NameOfFig). -->
 
 # Background
 
@@ -18,35 +18,65 @@ Using a dataset of recorded EMS trips containing call locations, dispatch and ar
 
 Our goal is to determine which North station location would most effectively reduce response times and how the four available ambulances should be allocated among the stations to balance coverage and minimize system strain. We aim to illustrate this through visual and numerical summaries that highlight tradeoffs in travel time and resource availability across the scenarios.
 
-## The Data
+# Data and Exploratory Analysis
+
+## Data
 
 <!-- Talk about Duke Hospital outlier removed, how we handled NAs, etc. -->
 
+On the raw EMS call data, we ensured every row represented a single, unique incident.
+
 ## Exploratory Data Analysis
 
+# Modeling
 
+## Model Selection and Rationale
 
-# Our Model
+We chose to use a linear mixed model with a fixed effect on Scenario, which allowed us to calculate and test the difference in the mean simulated response time between our five Scenarios (S0 through S4), as one of the primary objectives was determining changes in response time across different scenarios.
 
-## Model rationale
+We also included a random intercept for Incident_ID, allowing every unique incident to have its own baseline average response time that differs from the overall mean, even before accounting for the Scenario.
 
+We fit a preliminary model with just these two components, but it had a lot of heteroscedasticity in the residuals plot. Therefore, we added a variance function that allows the remaining unexplained variability in response time to be different for each Scenario. If a scenario has a high residual variance, it means that even after controlling for the mean, its response times are highly unpredictable or erratic. Meanwhile, if a scenario has a low residual variance, it indicates highly consistent service performance, which is generally desirable in a real-world context.
 
+Thus, our final model was:
 
-## Model implementation and evaluation
+$$
+\text{sim_time}_{ij} = \beta_0+\sum_{k=1}^4\beta_k\cdot I( \text{Scenario}_j = S_k) +u_i+\epsilon_{ij}
+$$
 
+$$
+u_i \sim N(0, \sigma^2_u)\text{, }\epsilon_{ij} \sim N(0, \sigma^2)
+$$
 
+where $\sigma^2_j = \sigma^2 \cdot\delta^2_j$
 
-## Model results
+$\text{sim_time}_{ij}$ is the simulated response time for the $i$-th Incident ID under the $j$-th Scenario.
 
+$u_i$ is the random intercept for the $i$-th Incident ID. $\sigma^2_j$ is the residual variance specific to the $j$-th Scenario, which is impacted by our variance parameter $\delta_j^2$ that scales the baseline variance for Scenario $j$.
 
+## Model Implementation
 
-# Shortcomings and Future Work
+Linear mixed models were fit in R using the `nlme` package. Additionally, we ended up dropping data where simulated time was the same across all scenarios in order to focus on the effect of changes resulting from the different Scenarios.
 
+## Model Evaluation
 
+Dropping the data where simulated time was the same across all scenarios resulted in a lower AIC and BIC of the model fitted on the reduced dataset compared to the non-reduced dataset.
 
-# Conclusion
+We also examined a QQ plot which appears approximately normal. Our Normalized Residuals vs Fitted Values plot of the total response time appears randomly distributed.
 
+We also looked at the Residuals vs Fitted by Scenario, where the points in red indicate calls where the assigned station under the simulation was different from the assigned station in our original dataset.
 
+# Model Results
+
+The intercept term is the estimated mean simulated total response time for the reference group, Scenario 0, which is the current distribution of ambulances and stations. The mean response time in S0 is approximately 470.22 seconds or 7 minutes, 50 seconds. This value is highly significant, with a p-value \< 0.001 .
+
+The mean simulated total response time in Scenario 3 is estimated to be 60.96 seconds faster than in Scenario 0, with this being a significant difference.
+
+# Conclusion, Shortcomings and Future Work
+
+## Conclusion
+
+## Limitations and Future Work
 
 \newpage
 
@@ -202,4 +232,3 @@ ems %>%
 ```{r label = "eda3", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "", fig.show = 'hold'}
 
 ```
-
