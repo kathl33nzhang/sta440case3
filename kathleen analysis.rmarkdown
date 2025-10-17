@@ -1,0 +1,836 @@
+**libraries**
+
+
+
+```{r}
+# ---- CHUNK 1 (revised): Setup & Normalize using UA travel times only ----
+library(tidyverse)
+library(lubridate)
+
+objs_loaded <- load("emsData.RData")
+ems <- if ("ems" %in% objs_loaded) get("ems") else if ("x" %in% objs_loaded) get("x") else stop("No 'ems' or 'x' in emsData.RData")
+
+# Helper: safely coerce to POSIXct if not already
+to_posix <- function(x) if (inherits(x, "POSIXt")) x else ymd_hms(x, quiet = TRUE)
+
+# Ensure UA columns exist (create as NA if missing so mutate won’t error)
+ua_needed <- c("eTT.UA.Ce", "eTT.UA.So", "eTT.UA.NN", "eTT.UA.FN")
+for (nm in ua_needed) if (!nm %in% names(ems)) ems[[nm]] <- NA_real_
+
+# Build standardized incident table
+ems_std <- ems %>%
+  mutate(
+    dispatch_at = to_posix(DT.DISP),
+    clear_at    = to_posix(DT.AVAILABLE),
+    service_secs = as.numeric(difftime(clear_at, dispatch_at, units = "secs")),
+
+    # UA travel times only (seconds); keep as numeric
+    tt_central    = eTT.UA.Ce,
+    tt_south      = eTT.UA.So,
+    tt_near_north = eTT.UA.NN,
+    tt_far_north  = eTT.UA.FN
+  ) %>%
+  arrange(dispatch_at) %>%
+  group_by(dispatch_at) %>%
+  slice(1) %>%                      # one row per incident (first record at that dispatch time)
+  ungroup() %>%
+  mutate(incident_id = row_number()) %>%
+  select(
+    incident_id, dispatch_at, clear_at, service_secs,
+    REF.GRID, DISPATCH.PRIORITY.NAME, BASE.NAME, VEH.GRID,
+    tt_central, tt_south, tt_near_north, tt_far_north
+  )
+
+# Light checks so we know what we have
+message("Rows: ", nrow(ems_std))
+message("Missing dispatch_at: ", sum(is.na(ems_std$dispatch_at)))
+message("Missing clear_at: ", sum(is.na(ems_std$clear_at)))
+message("Non-positive service_secs: ", sum(!is.na(ems_std$service_secs) & ems_std$service_secs <= 0))
+summary(select(ems_std, tt_central, tt_south, tt_near_north, tt_far_north))
+
+```
+
+```{r}
+scenarios <- tibble::tribble(
+  ~scenario, ~units,
+  "S0", list(c(Central=3, South=1)),
+  "S1", list(c(Central=3, NearNorth=1)),
+  "S2", list(c(Central=3, FarNorth=1)),
+  "S3", list(c(Central=2, NearNorth=1, South=1)),
+  "S4", list(c(Central=2, FarNorth=1, South=1))
+)
+
+station_tt_map <- c(
+  Central   = "tt_central",
+  NearNorth = "tt_near_north",
+  FarNorth  = "tt_far_north",
+  South     = "tt_south"
+)
+```
+
+```{r}
+# ---- PATCHED simulate_scenario(): NA/edge-case safe ----
+
+simulate_scenario <- function(incidents, units_cfg_named_vec) {
+  # normalize: keep names even if it was a list/list-col
+  counts_raw <- units_cfg_named_vec
+  if (is.list(counts_raw)) {
+    counts_raw <- unlist(counts_raw, recursive = TRUE, use.names = TRUE)
+  }
+  # coerce to numeric with names intact
+  counts <- as.integer(counts_raw)
+  nms    <- names(counts_raw)
+  if (is.null(nms) || anyNA(nms) || length(nms) == 0) {
+    stop("Scenario 'units_cfg' must be a *named* numeric vector, e.g. c(Central=2, South=1).")
+  }
+  if (sum(counts, na.rm = TRUE) <= 0) stop("Scenario has zero units.")
+
+  # ----- keep the rest of your function body unchanged -----
+  station_vec <- rep(nms, times = counts)
+  seq_per_station <- ave(seq_along(station_vec), station_vec, FUN = seq_along)
+  unit_id_vec <- paste0(station_vec, "_", seq_per_station)
+  t0 <- suppressWarnings(min(incidents$dispatch_at, na.rm = TRUE))
+  if (!is.finite(as.numeric(t0))) stop("All incident dispatch times are NA.")
+  fleet <- data.frame(
+    station   = station_vec,
+    unit_id   = unit_id_vec,
+    next_free = t0 - lubridate::seconds(1),
+    stringsAsFactors = FALSE
+  )
+
+  # helper: map station -> travel-time column in 'incidents'
+  tt_col_for <- function(st) switch(st,
+    "Central"   = "tt_central",
+    "South"     = "tt_south",
+    "NearNorth" = "tt_near_north",
+    "FarNorth"  = "tt_far_north",
+    stop("Unknown station in scenario: ", st)
+  )
+
+  # 2) Sim loop
+  nI <- nrow(incidents)
+  out_list <- vector("list", nI)
+
+  for (i in seq_len(nI)) {
+    call_t <- incidents$dispatch_at[i]
+    if (is.na(call_t)) next
+
+    svc <- incidents$service_secs[i]
+    if (is.na(svc) || svc < 0) svc <- 0
+
+    # per-unit travel times to THIS incident (NA -> Inf)
+    tt_cols <- vapply(fleet$station, tt_col_for, character(1))
+    tt_vals <- vapply(tt_cols, function(col) {
+      val <- incidents[[col]][i]
+      if (is.null(val) || is.na(val)) Inf else as.numeric(val)
+    }, numeric(1))
+
+    # availability (NA -> FALSE)
+    avail <- fleet$next_free <= call_t
+    avail[is.na(avail)] <- FALSE
+
+    if (!any(avail)) {
+      nf <- as.numeric(fleet$next_free); nf[is.na(nf)] <- Inf
+      chosen <- which.min(nf); if (length(chosen) == 0) chosen <- 1
+      wait_s <- max(0, as.numeric(difftime(fleet$next_free[chosen], call_t, units = "secs")))
+      travel_s <- if (is.finite(tt_vals[chosen])) tt_vals[chosen] else 0
+      depart_time <- fleet$next_free[chosen]
+    } else {
+      idx <- which(avail)
+      finite_tt <- tt_vals[idx]
+      if (!any(is.finite(finite_tt))) {
+        chosen <- idx[1]
+        travel_s <- 0
+      } else {
+        chosen <- idx[which.min(finite_tt)]
+        travel_s <- tt_vals[chosen]
+      }
+      wait_s <- 0
+      depart_time <- call_t
+    }
+
+    # update fleet
+    fleet$next_free[chosen] <- depart_time + lubridate::seconds(wait_s + travel_s + svc)
+
+    # record
+    out_list[[i]] <- tibble::tibble(
+      incident_id        = incidents$incident_id[i],
+      assigned_station   = fleet$station[chosen],
+      assigned_unit      = fleet$unit_id[chosen],
+      wait_secs          = wait_s,
+      travel_secs        = travel_s,
+      total_response_secs = wait_s + travel_s
+    )
+  }
+
+  dplyr::bind_rows(out_list)
+}
+
+```
+
+```{r}
+# ---- CHUNK 3b: Redefine incidents to match the other group ----
+
+ems_for_inc <- ems %>%
+  mutate(
+    dispatch_at  = to_posix(DT.DISP),
+    clear_at     = to_posix(DT.AVAILABLE),
+    service_secs = as.numeric(difftime(clear_at, dispatch_at, units = "secs")),
+    # UA-only travel times
+    tt_central    = eTT.UA.Ce,
+    tt_south      = eTT.UA.So,
+    tt_near_north = eTT.UA.NN,
+    tt_far_north  = eTT.UA.FN
+  ) %>%
+  arrange(dispatch_at) %>%
+  group_by(dispatch_at, BASE.NAME) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(incident_id = row_number()) %>%
+  select(incident_id, dispatch_at, clear_at, service_secs,
+         tt_central, tt_south, tt_near_north, tt_far_north)
+
+
+```
+
+```{r}
+
+# ---- CHUNK 4: Define scenarios and run them ----
+
+inc <- ems_for_inc %>%
+  filter(!is.na(dispatch_at),
+         !is.na(service_secs),
+         service_secs >= 0) %>%
+  # keep incidents with at least one available travel time
+  filter(rowSums(!is.na(select(., tt_central, tt_south, tt_near_north, tt_far_north))) >= 1) %>%
+  arrange(dispatch_at)
+
+# Scenarios stored as named numeric vectors (not lists of lists)
+scenarios <- tibble::tibble(
+  scenario  = c("S0","S1","S2","S3","S4"),
+  units_cfg = list(
+    c(Central = 3, South     = 1),
+    c(Central = 3, NearNorth = 1),
+    c(Central = 3, FarNorth  = 1),
+    c(Central = 2, NearNorth = 1, South = 1),
+    c(Central = 2, FarNorth  = 1, South = 1)
+  )
+)
+
+
+# Run each scenario
+sim_results <- scenarios %>%
+  mutate(sim = purrr::map(units_cfg, ~ simulate_scenario(inc, .x))) %>%
+  select(scenario, sim) %>%
+  tidyr::unnest(sim) %>%
+  left_join(inc %>% select(incident_id, service_secs), by = "incident_id") %>%
+  mutate(total_time_secs = total_response_secs + service_secs)
+
+# Coerce to plain numeric seconds and recompute totals
+sim_results <- sim_results %>%
+  mutate(
+    wait_secs           = as.numeric(wait_secs),
+    travel_secs         = as.numeric(travel_secs),
+    service_secs        = as.numeric(service_secs),
+    total_response_secs = as.numeric(wait_secs + travel_secs),
+    total_time_secs     = as.numeric(total_response_secs + service_secs)
+  )
+
+
+# Keep only finite, plausible response times (0–2 hours)
+sim_results_clean <- sim_results %>%
+  filter(is.finite(total_response_secs),
+         total_response_secs >= 0,
+         total_response_secs <= 2*60*60)
+
+sim_results_clean
+```
+
+```{r}
+cat("\n--- object sizes ---\n")
+for (nm in c("ems_std","ems_for_inc","inc","sim_results","sim_results_clean")) {
+  if (exists(nm)) cat(nm, ": nrow =", nrow(get(nm)), "\n")
+}
+
+cat("\n--- column classes in sim_results_clean ---\n")
+print(sapply(sim_results_clean %>%
+               select(scenario, wait_secs, travel_secs, service_secs,
+                      total_response_secs, total_time_secs),
+             function(x) paste(class(x), collapse=" / ")))
+
+cat("\n--- quick summaries (should be a few hundred seconds) ---\n")
+print(summary(sim_results_clean$total_response_secs))
+
+cat("\n--- any impossible values? (> 2 hrs) ---\n")
+bad <- sim_results_clean %>%
+  filter(!is.finite(total_response_secs) |
+         total_response_secs < 0 |
+         total_response_secs > 2*60*60)
+print(nrow(bad))
+print(head(bad, 5))
+
+cat("\n--- are you summarizing the CLEAN table? ---\n")
+summ_tbl_check <- sim_results_clean %>%
+  group_by(scenario) %>%
+  summarise(mean_resp = mean(total_response_secs), .groups="drop")
+print(summ_tbl_check)
+
+
+```
+
+```{r}
+# ---- CHUNK 5: Summaries & Plots ----
+library(tidyverse)
+library(scales)
+
+# Response-time summaries (travel + wait)
+summ_tbl <- sim_results_clean %>%
+  group_by(scenario) %>%
+  summarise(
+    n               = n(),
+    mean_resp_s     = mean(total_response_secs),
+    median_resp_s   = median(total_response_secs),
+    p90_resp_s      = quantile(total_response_secs, 0.90),
+    p95_resp_s      = quantile(total_response_secs, 0.95),
+    pct_under_8min  = mean(total_response_secs <= 8*60),
+    pct_under_10min = mean(total_response_secs <= 10*60),
+    .groups = "drop"
+  ) %>%
+  arrange(mean_resp_s)
+
+print(summ_tbl)
+
+# Boxplot of response times by scenario (cap extreme tails for readability)
+plot_df <- sim_results_clean %>%
+  mutate(scenario = factor(scenario, levels = sort(unique(scenario))))
+
+ggplot(plot_df, aes(x = scenario, y = total_response_secs)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  scale_y_continuous("Total Response (s)",
+                     labels = scales::label_number(accuracy = 1)) +
+  labs(title = "Response Time Distributions by Scenario") +
+  theme_minimal()
+
+
+# ---- Side boxplot (response times in minutes) ----
+plot_df <- sim_results_clean %>%
+  mutate(
+    scenario = factor(scenario, levels = sort(unique(scenario))),
+    total_response_min = total_response_secs / 60
+  ) %>%
+  dplyr::group_by(scenario) %>%
+  dplyr::filter(total_response_min != max(total_response_min, na.rm = TRUE)) %>%
+  dplyr::ungroup()
+
+ggplot(plot_df, aes(y = scenario, x = total_response_min)) +
+  geom_boxplot(outlier.alpha = 0.25, width = 0.6, color = "gray30", fill = "white") +
+  scale_x_continuous(
+    "Total Response Time (minutes)",
+    breaks = seq(0, 30, 2),
+    labels = function(x) format(x, nsmall = 0, trim = TRUE)
+  ) +
+  labs(
+    title = "Response Time Distributions by Scenario",
+    subtitle = "Distribution of total (travel + wait) response time per scenario",
+    y = "Scenario"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank(),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    axis.title.x = element_text(face = "bold", margin = margin(t = 8)),
+    axis.title.y = element_text(face = "bold", margin = margin(r = 8))
+  )
+
+
+# Cumulative Line Plot
+thresholds <- seq(0, 25*60, by = 60)
+
+curve_df <- tidyr::expand_grid(
+  scenario = unique(sim_results_clean$scenario),
+  threshold = thresholds
+) %>%
+  group_by(scenario, threshold) %>%
+  summarise(
+    pct_under = mean(sim_results_clean$total_response_secs[sim_results_clean$scenario == scenario[1]] <= threshold),
+    .groups = "drop"
+  )
+
+ggplot(curve_df, aes(x = threshold / 60, y = pct_under, color = scenario)) +
+  geom_line(size = 0.5) +
+  scale_y_continuous("Cumulative % of Calls Responded", labels = scales::percent) +
+  scale_x_continuous("Response Time (minutes)", breaks = seq(0, 25, 2)) +
+  labs(title = "Cumulative On-Time Performance by Scenario") +
+  theme_minimal()
+
+
+# ECDF
+ggplot(sim_results_clean, aes(x = total_response_secs, color = scenario)) +
+  stat_ecdf(geom = "step") +
+  scale_x_continuous("Total Response (s)",
+                     labels = scales::label_number(accuracy = 1)) +
+  labs(title = "ECDF of Total Response Times") +
+  theme_minimal()
+
+
+```
+
+```{r}
+# ---- CHUNK 6b: Logistic models for on-time performance ----
+
+library(tidyverse)
+
+logit_df <- sim_results_clean %>%
+  transmute(
+    incident_id,
+    scenario = factor(scenario),
+    rt_sec   = as.numeric(total_response_secs),
+    ontime_8  = as.integer(rt_sec <= 8*60),
+    ontime_10 = as.integer(rt_sec <= 10*60)
+  ) %>%
+  # keep rows where the binary outcomes are defined
+  filter(!is.na(ontime_8), !is.na(ontime_10)) %>%
+  mutate(scenario = relevel(scenario, ref = "S1"))
+
+use_lme4 <- requireNamespace("lme4", quietly = TRUE)
+
+if (use_lme4) {
+  library(lme4)
+
+  # Mixed-effects logistic (random intercept by incident)
+  m8  <- glmer(ontime_8  ~ scenario + (1 | incident_id),
+               data = logit_df, family = binomial(link = "logit"),
+               control = glmerControl(optimizer = "bobyqa"))
+  m10 <- glmer(ontime_10 ~ scenario + (1 | incident_id),
+               data = logit_df, family = binomial(link = "logit"),
+               control = glmerControl(optimizer = "bobyqa"))
+
+  cat("\n--- Mixed-effects logistic: ≤ 8 minutes (baseline S0) ---\n")
+  print(summary(m8))
+  cat("\n--- Mixed-effects logistic: ≤ 10 minutes (baseline S0) ---\n")
+  print(summary(m10))
+
+  # Odds ratios with 95% CIs
+  or_ci <- function(mod) {
+    est <- suppressWarnings(coef(summary(mod)))
+    tibble(
+      term = rownames(est),
+      OR   = exp(est[, "Estimate"]),
+      LCL  = exp(est[, "Estimate"] - 1.96*est[, "Std. Error"]),
+      UCL  = exp(est[, "Estimate"] + 1.96*est[, "Std. Error"])
+    ) %>%
+      filter(term != "(Intercept)") %>%
+      mutate(scenario = sub("^scenario", "", term)) %>%
+      select(scenario, OR, LCL, UCL)
+  }
+
+  or8  <- or_ci(m8)
+  or10 <- or_ci(m10)
+
+  # Scenario-level predicted probabilities (marginal at typical incident)
+  invlogit <- function(x) 1/(1+exp(-x))
+  pred_tbl <- function(mod, title) {
+    cf  <- fixef(mod) # fixed effects
+    scs <- levels(logit_df$scenario)
+    tibble(scenario = scs) %>%
+      mutate(
+        lp = cf["(Intercept)"] + c(0, cf[paste0("scenarios", scs[-1])]),
+        # above line assumes contrast naming like scenarioS2, S3, ...
+        # safer approach (handles any contrast names):
+        lp = map_dbl(scenario, ~{
+          if (.x == scs[1]) cf["(Intercept)"]
+          else {
+            nm <- names(cf)[grepl("^scenario", names(cf)) & grepl(.x, names(cf))]
+            cf["(Intercept)"] + if (length(nm)==1) cf[nm] else 0
+          }
+        }),
+        p  = invlogit(lp)
+      ) %>% select(scenario, p) %>% arrange(scenario) %>% mutate(model = title)
+  }
+
+  preds8  <- pred_tbl(m8,  "≤8 min")
+  preds10 <- pred_tbl(m10, "≤10 min")
+
+  # Save outputs
+  readr::write_csv(or8,  "logit_or_le8min.csv")
+  readr::write_csv(or10, "logit_or_le10min.csv")
+  bind_rows(preds8, preds10) %>% readr::write_csv("logit_pred_probs_by_scenario.csv")
+
+} else {
+  # Fallback: fixed-effects logistic with cluster-robust SE by incident (no random effects)
+  # Requires fixest >= 0.11.2
+  if (!requireNamespace("fixest", quietly = TRUE)) {
+    stop("Neither lme4 nor fixest are available. Install one of them to run logistic models.")
+  }
+  library(fixest)
+
+  fe8  <- feglm(ontime_8  ~ i(scenario, ref = "S0") | incident_id,
+                data = logit_df, family = "logit", cluster = ~ incident_id)
+  fe10 <- feglm(ontime_10 ~ i(scenario, ref = "S0") | incident_id,
+                data = logit_df, family = "logit", cluster = ~ incident_id)
+
+  cat("\n--- Fixed-effects logistic (clustered): ≤ 8 minutes ---\n");  print(summary(fe8))
+  cat("\n--- Fixed-effects logistic (clustered): ≤ 10 minutes ---\n"); print(summary(fe10))
+
+  # Odds ratios
+  or_tbl <- function(mod) {
+    co <- broom::tidy(mod) %>%
+      filter(str_detect(term, "scenario::")) %>%
+      mutate(
+        scenario = sub("^i\\(scenario, ref = \"S1\"\\)::", "", term),
+        OR  = exp(estimate),
+        LCL = exp(estimate - 1.96*std.error),
+        UCL = exp(estimate + 1.96*std.error)
+      ) %>% select(scenario, OR, LCL, UCL)
+    co
+  }
+
+  if (!requireNamespace("broom", quietly = TRUE)) install.packages("broom")
+  library(broom)
+
+  or8  <- or_tbl(fe8)
+  or10 <- or_tbl(fe10)
+
+  # Predicted probabilities by scenario (marginal effects at means)
+  invlogit <- function(x) 1/(1+exp(-x))
+  pred_tbl_fixest <- function(mod, title) {
+    scs <- levels(logit_df$scenario)
+    # Get baseline intercept (fixest hides fixed effects; use S1 coefficient = 0 reference)
+    tibble(scenario = scs) %>%
+      mutate(
+        beta = ifelse(scenario == "S0", 0,
+                      coef(mod)[paste0("i(scenario, ref = \"S1\")::", scenario)] %||% 0),
+        # center at average FE (approximate marginal): works for comparisons
+        p = invlogit(beta)
+      ) %>% select(scenario, p) %>% arrange(scenario) %>% mutate(model = title)
+  }
+
+  `%||%` <- function(a,b) if (!is.null(a)) a else b
+
+  preds8  <- pred_tbl_fixest(fe8,  "≤8 min")
+  preds10 <- pred_tbl_fixest(fe10, "≤10 min")
+
+  readr::write_csv(or8,  "logit_or_le8min.csv")
+  readr::write_csv(or10, "logit_or_le10min.csv")
+  bind_rows(preds8, preds10) %>% readr::write_csv("logit_pred_probs_by_scenario.csv")
+}
+
+# Quick glance in-session
+cat("\n--- Odds ratios (≤8 min) ---\n"); print(or8)
+cat("\n--- Odds ratios (≤10 min) ---\n"); print(or10)
+cat("\n--- Predicted probabilities by scenario ---\n"); print(bind_rows(preds8, preds10))
+
+```
+
+```{r}
+# ---- CHUNK 6c: Gamma GLM / GLMM models for continuous response time ----
+
+# Build modeling frame
+gamma_df <- sim_results_clean %>%
+  transmute(
+    incident_id,
+    scenario = factor(scenario),
+    y = as.numeric(total_response_secs)
+  ) %>%
+  filter(is.finite(y), y > 0) %>%
+  mutate(scenario = relevel(scenario, ref = "S0"))  # match logistic baseline
+
+stopifnot(nrow(gamma_df) > 0)
+
+# 1) Gamma GLM with log link
+g_glm <- glm(y ~ scenario, data = gamma_df, family = Gamma(link = "log"))
+
+cat("\n=== Gamma GLM (log link) ===\n")
+print(summary(g_glm))
+
+# Exponentiated coefficients (multiplicative effects vs baseline S1)
+glm_coef <- coef(summary(g_glm))
+glm_fx <- tibble::tibble(
+  term     = rownames(glm_coef),
+  estimate = exp(glm_coef[, "Estimate"]),
+  LCL      = exp(glm_coef[, "Estimate"] - 1.96 * glm_coef[, "Std. Error"]),
+  UCL      = exp(glm_coef[, "Estimate"] + 1.96 * glm_coef[, "Std. Error"]),
+  p.value  = glm_coef[, "Pr(>|t|)"] %||% glm_coef[, "Pr(>|z|)"]
+) %>%
+  mutate(term = ifelse(term == "(Intercept)", "(Intercept)", sub("^scenario", "", term)))
+
+cat("\n--- Multiplicative effects (exp(beta)) vs baseline S1 [GLM] ---\n")
+print(glm_fx)
+
+# Predicted mean response time (seconds) by scenario
+pred_glm <- gamma_df %>%
+  distinct(scenario) %>%
+  mutate(pred_mean_sec = as.numeric(predict(g_glm, newdata = ., type = "response"))) %>%
+  arrange(scenario)
+
+cat("\n--- Predicted mean response time by scenario (seconds) [GLM] ---\n")
+print(pred_glm)
+
+# 2) Gamma GLMM with random intercept by incident (optional)
+g_glmm <- NULL
+if (requireNamespace("lme4", quietly = TRUE) && "incident_id" %in% names(gamma_df)) {
+  library(lme4)
+  gamma_df <- gamma_df %>% mutate(incident_id = factor(incident_id))
+
+  g_glmm <- suppressWarnings(
+    glmer(
+      y ~ scenario + (1 | incident_id),
+      data = gamma_df,
+      family = Gamma(link = "log"),
+      control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+    )
+  )
+
+  cat("\n=== Gamma GLMM (log link) with random intercept by incident ===\n")
+  print(summary(g_glmm))
+
+  # Fixed effects as multiplicative factors
+  glmm_coef <- coef(summary(g_glmm))
+  glmm_fx <- tibble::tibble(
+    term     = rownames(glmm_coef),
+    estimate = exp(glmm_coef[, "Estimate"]),
+    LCL      = exp(glmm_coef[, "Estimate"] - 1.96 * glmm_coef[, "Std. Error"]),
+    UCL      = exp(glmm_coef[, "Estimate"] + 1.96 * glmm_coef[, "Std. Error"]),
+    p.value  = glmm_coef[, "Pr(>|z|)"]
+  ) %>%
+  mutate(term = ifelse(term == "(Intercept)", "(Intercept)", sub("^scenario", "", term)))
+
+  cat("\n--- Multiplicative effects (exp(beta)) vs baseline S1 [GLMM] ---\n")
+  print(glmm_fx)
+
+  # Predicted means by scenario (population-level: fixed effects only)
+  pred_glmm <- gamma_df %>%
+    distinct(scenario) %>%
+    mutate(pred_mean_sec = as.numeric(predict(g_glmm, newdata = ., type = "response", re.form = NA))) %>%
+    arrange(scenario)
+
+  cat("\n--- Predicted mean response time by scenario (seconds) [GLMM] ---\n")
+  print(pred_glmm)
+} else {
+  cat("\n[lme4 not available or incident_id missing] Skipping Gamma GLMM.\n")
+}
+
+# Helper for `%||%`
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+```
+
+```{r}
+# ---- CHUNK 7 (robust): Diagnostics ----
+
+safe_re <- function(mod, grp = "incident_id") {
+  if (!inherits(mod, "merMod")) return(numeric(0))
+  re_list <- try(lme4::ranef(mod, condVar = FALSE), silent = TRUE)
+  if (inherits(re_list, "try-error")) return(numeric(0))
+  if (!grp %in% names(re_list)) return(numeric(0))
+  vec <- suppressWarnings(as.numeric(re_list[[grp]][,"(Intercept)"]))
+  vec[is.finite(vec)]
+}
+
+# ----- Seconds model -----
+if (exists("m") && inherits(m, "merMod")) {
+  par(mfrow = c(1, 2), las = 1)
+
+  # Residuals vs Fitted
+  plot(fitted(m), resid(m),
+       xlab = "Fitted (s)", ylab = "Residuals (s)",
+       main = "Residuals vs Fitted (seconds)")
+  abline(h = 0, col = "gray60")
+
+  # QQ plot residuals
+  qqnorm(resid(m), main = "QQ Plot Residuals (seconds)")
+  qqline(resid(m), col = "gray60")
+
+  # Random effects QQ (only if available)
+  re_int <- safe_re(m, "incident_id")
+  if (length(re_int) > 1) {
+    par(mfrow = c(1, 1), las = 1)
+    qqnorm(re_int, main = "QQ Plot Random Intercepts (seconds)")
+    qqline(re_int, col = "gray60")
+  } else {
+    message("Skipped random-effects QQ (seconds): no finite random effects to plot.")
+  }
+}
+
+# ----- Log-seconds model -----
+if (exists("m_log") && inherits(m_log, "merMod")) {
+  par(mfrow = c(1, 2), las = 1)
+
+  # Residuals vs Fitted
+  plot(fitted(m_log), resid(m_log),
+       xlab = "Fitted log(s)", ylab = "Residuals",
+       main = "Residuals vs Fitted (log seconds)")
+  abline(h = 0, col = "gray60")
+
+  # QQ plot residuals
+  qqnorm(resid(m_log), main = "QQ Plot Residuals (log seconds)")
+  qqline(resid(m_log), col = "gray60")
+
+  # Random effects QQ (only if available)
+  re_int_log <- safe_re(m_log, "incident_id")
+  if (length(re_int_log) > 1) {
+    par(mfrow = c(1, 1), las = 1)
+    qqnorm(re_int_log, main = "QQ Plot Random Intercepts (log)")
+    qqline(re_int_log, col = "gray60")
+  } else {
+    message("Skipped random-effects QQ (log): no finite random effects to plot.")
+  }
+}
+
+```
+
+```{r}
+# ---- CHUNK 7c: Diagnostics for Gamma models (GLM and GLMM) ----
+
+# GLM diagnostics
+if (exists("g_glm") && inherits(g_glm, "glm")) {
+  cat("\n=== Gamma GLM diagnostics ===\n")
+
+  # Residuals vs fitted (deviance residuals)
+  par(mfrow = c(1, 2), las = 1)
+  plot(
+    fitted(g_glm),
+    resid(g_glm, type = "deviance"),
+    xlab = "Fitted mean (seconds)",
+    ylab = "Deviance residual",
+    main = "GLM: residuals vs fitted"
+  )
+  abline(h = 0, col = "gray60")
+
+  # QQ plot of deviance residuals
+  qqnorm(resid(g_glm, type = "deviance"), main = "GLM: QQ plot (deviance residuals)")
+  qqline(resid(g_glm, type = "deviance"), col = "gray60")
+  par(mfrow = c(1, 1))
+
+  # Dispersion check (Gamma with log link: deviance/df should be ~1)
+  dev <- sum(resid(g_glm, type = "deviance")^2)
+  disp <- dev / df.residual(g_glm)
+  cat(sprintf("Approx. dispersion (deviance / df): %.3f\n", disp))
+
+  # AIC
+  cat(sprintf("AIC [GLM]: %.1f\n", AIC(g_glm)))
+}
+
+# GLMM diagnostics (if fitted)
+if (exists("g_glmm") && inherits(g_glmm, "merMod")) {
+  cat("\n=== Gamma GLMM diagnostics ===\n")
+
+  # Residuals vs fitted (Pearson residuals)
+  par(mfrow = c(1, 2), las = 1)
+  rp <- resid(g_glmm, type = "pearson")
+  plot(
+    fitted(g_glmm),
+    rp,
+    xlab = "Fitted mean (seconds)",
+    ylab = "Pearson residual",
+    main = "GLMM: residuals vs fitted"
+  )
+  abline(h = 0, col = "gray60")
+
+  # QQ plot of Pearson residuals
+  qqnorm(rp, main = "GLMM: QQ plot (Pearson residuals)")
+  qqline(rp, col = "gray60")
+  par(mfrow = c(1, 1))
+
+  # Random-intercept QQ (incident effects)
+  safe_re <- function(mod, grp = "incident_id") {
+    re_list <- try(lme4::ranef(mod, condVar = FALSE), silent = TRUE)
+    if (inherits(re_list, "try-error") || !grp %in% names(re_list)) return(numeric(0))
+    vec <- suppressWarnings(as.numeric(re_list[[grp]][, "(Intercept)"]))
+    vec[is.finite(vec)]
+  }
+  re_int <- safe_re(g_glmm, "incident_id")
+  if (length(re_int) > 1) {
+    qqnorm(re_int, main = "GLMM: QQ plot (random intercepts)")
+    qqline(re_int, col = "gray60")
+  } else {
+    message("Skipped random-effects QQ: no finite random effects to plot.")
+  }
+
+  # AIC
+  cat(sprintf("AIC [GLMM]: %.1f\n", AIC(g_glmm)))
+}
+```
+
+```{r}
+# ---- CHUNK 8: Model Comparison & Selection ----
+
+summarize_model <- function(mod, name, family, link, has_random = FALSE) {
+  ll  <- tryCatch(as.numeric(logLik(mod)), error = function(e) NA_real_)
+  aic <- tryCatch(AIC(mod),                 error = function(e) NA_real_)
+  tibble::tibble(
+    model = name,
+    family = family,
+    link = link,
+    random_effects = has_random,
+    logLik = ll,
+    AIC = aic
+  )
+}
+
+cmp_tbl <- dplyr::bind_rows(
+  if (exists("g_glm"))  summarize_model(g_glm,  "Gamma GLM",  "Gamma",  "log", FALSE),
+  if (exists("g_glmm")) summarize_model(g_glmm, "Gamma GLMM", "Gamma",  "log", TRUE),
+  if (exists("m8"))     summarize_model(m8,     "Logistic GLMM (≤8)",  "Binomial", "logit", TRUE),
+  if (exists("m10"))    summarize_model(m10,    "Logistic GLMM (≤10)", "Binomial", "logit", TRUE),
+  if (exists("fe8"))    summarize_model(fe8,    "Logistic FE (≤8)",    "Binomial", "logit", FALSE),
+  if (exists("fe10"))   summarize_model(fe10,   "Logistic FE (≤10)",   "Binomial", "logit", FALSE)
+) %>% 
+  dplyr::arrange(family, dplyr::desc(random_effects), AIC)
+
+cat("\n=== Model comparison (likelihood-based) ===\n")
+print(cmp_tbl)
+
+# Optional: pseudo-R2 for logistic mixed models, if MuMIn is available
+if (requireNamespace("MuMIn", quietly = TRUE)) {
+  library(MuMIn)
+  if (exists("m8")) {
+    r2_8 <- MuMIn::r.squaredGLMM(m8)
+    cat("\nLogistic GLMM (≤8) R² (marginal/conditional):\n")
+    print(r2_8)
+  }
+  if (exists("m10")) {
+    r2_10 <- MuMIn::r.squaredGLMM(m10)
+    cat("\nLogistic GLMM (≤10) R² (marginal/conditional):\n")
+    print(r2_10)
+  }
+}
+
+# Optional: simple calibration / Brier score for logistic models
+brier <- function(obs, p) mean((p - obs)^2)
+
+if (exists("m8")) {
+  p8 <- as.numeric(predict(m8, type = "response"))
+  b8 <- brier(logit_df$ontime_8, p8)
+  cat(sprintf("\nBrier score (≤8, GLMM): %.4f\n", b8))
+}
+if (exists("m10")) {
+  p10 <- as.numeric(predict(m10, type = "response"))
+  b10 <- brier(logit_df$ontime_10, p10)
+  cat(sprintf("Brier score (≤10, GLMM): %.4f\n", b10))
+}
+
+# --- Final selection logic (prints a short recommendation) ---
+cat("\n=== Recommendation ===\n")
+if (exists("m8")) {
+  cat("* Primary: Logistic GLMM (≤8 minutes) — aligns with service-level target; handles repeated incidents via random intercepts.\n")
+  if (exists("g_glmm") && exists("g_glm")) {
+    if (is.finite(AIC(g_glmm)) && is.finite(AIC(g_glm)) && AIC(g_glmm) < AIC(g_glm)) {
+      cat("* Secondary (robustness): Gamma GLMM (log link) — preferred over Gamma GLM by AIC; report as continuous-time corroboration.\n")
+    } else {
+      cat("* Secondary (robustness): Gamma GLM/GLMM — include continuous-time results for context; logistic remains decision model.\n")
+    }
+  }
+} else if (exists("fe8")) {
+  cat("* Primary: Logistic FE (≤8 minutes) — used because lme4 was unavailable; still aligns with target and controls for incident.\n")
+} else if (exists("g_glmm")) {
+  cat("* Primary: Gamma GLMM (log link) — if policy target must be continuous seconds rather than a threshold.\n")
+} else if (exists("g_glm")) {
+  cat("* Primary: Gamma GLM (log link) — baseline continuous-time model when mixed-effects not available.\n")
+} else {
+  cat("* No fitted models found to recommend.\n")
+}
+```
+
