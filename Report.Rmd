@@ -2,10 +2,14 @@
 title: "Vance County EMS Station Analysis Report"
 author: "Alayna Binder, Cindy Ju, Kathleen Zhang"
 date: "2025-10-21"
-output: 
-  bookdown::pdf_document2:
+output:
+  pdf_document:
+    latex_engine: xelatex
     number_sections: true
-    toc: false
+    toc: true
+fontsize: 11pt
+geometry: margin=1in
+df_print: kable
 ---
 
 <!-- NOTE: To reference a figure in the report body, do @ref(fig:NameOfFig). -->
@@ -114,7 +118,10 @@ However, one limitation to our analysis is the travel-time realism- we used Goog
 library(tidyverse)
 library(ggrepel)
 library(xtable)
-
+library(knitr)
+library(dplyr)
+library(kableExtra)
+knitr::opts_chunk$set(message=FALSE, warning=FALSE)
 load("emsData.RData")
 
 ems <- x |>
@@ -219,10 +226,6 @@ north_choice <- ems |>
   count(closer_north) |>
   mutate(pct = n / sum(n))
 
-xtable(north_choice,
-       caption = "Proportion of North incidents closer to each proposed North station",
-       label = "tab:north_choice") |>
-  xtable2kable()
 ```
 
 **Figure Two: Comparison of Near vs. Far North Demand**
@@ -259,6 +262,156 @@ ems %>%
 
 **Figure Three: Percentage of Ambulance Utilization**
 
+```{r, include=FALSE}
+
+# --- 0) Clean datetimes & keep valid intervals ---
+ems <- ems %>%
+  mutate(
+    DT.DISP      = as_datetime(DT.DISP),
+    DT.AVAILABLE = as_datetime(DT.AVAILABLE)
+  ) %>%
+  filter(!is.na(VEH.GRID), !is.na(DT.DISP), !is.na(DT.AVAILABLE),
+         DT.AVAILABLE >= DT.DISP)
+
+# If two calls for the same ambulance overlap (due to logging quirks, delays, or bad timestamps), the code double-counts that unit as busy twice at the same time.
+ems %>%
+  arrange(VEH.GRID, DT.DISP) %>%
+  group_by(VEH.GRID) %>%
+  mutate(overlap = DT.DISP < lag(DT.AVAILABLE)) %>%
+  filter(overlap == TRUE)
+
+# Distinct vehicles present (sanity)
+n_units <- n_distinct(ems$VEH.GRID)
+if (n_units != 4) message("Note: dataset has ", n_units, " distinct VEH.GRID values.")
+
+# Observation window (for utilization denominators)
+t_start <- min(ems$DT.DISP, na.rm = TRUE)
+t_end   <- max(ems$DT.AVAILABLE, na.rm = TRUE)
+obs_seconds <- as.numeric(t_end - t_start, units = "secs")
+
+# --- 1) Merge overlapping intervals within each vehicle ---
+# Convert to numeric seconds for cummax, then back to POSIXct
+ems_intervals <- ems %>%
+  transmute(VEH.GRID,
+            start_num = as.numeric(DT.DISP),
+            end_num   = as.numeric(DT.AVAILABLE)) %>%
+  arrange(VEH.GRID, start_num, end_num) %>%
+  group_by(VEH.GRID) %>%
+  mutate(
+    prev_cummax_end = lag(cummax(end_num), default = first(start_num) - 1),
+    new_block = start_num > prev_cummax_end,
+    block_id  = cumsum(new_block)
+  ) %>%
+  group_by(VEH.GRID, block_id) %>%
+  summarise(start_num = min(start_num),
+            end_num   = max(end_num),
+            .groups = "drop") %>%
+  mutate(start = as_datetime(start_num),
+         end   = as_datetime(end_num)) %>%
+  select(VEH.GRID, start, end) %>%
+  arrange(VEH.GRID, start, end)
+
+# --- 2) Build global event timeline (+1 at start, -1 at end) ---
+events <- ems_intervals %>%
+  pivot_longer(c(start, end), names_to = "etype", values_to = "time") %>%
+  mutate(delta = if_else(etype == "start", 1L, -1L)) %>%
+  arrange(time, desc(delta))   # process -1 before +1 at identical timestamps
+
+timeline <- events %>%
+  transmute(time, delta) %>%
+  arrange(time) %>%
+  mutate(active = cumsum(delta),
+         time_next = lead(time),
+         seg_sec   = as.numeric(time_next - time, "secs")) %>%
+  filter(!is.na(time_next), seg_sec > 0)
+
+# --- 3) Duration-weighted summary of simultaneous busy vehicles (capped at 4) ---
+timeline <- timeline %>% mutate(active_capped = pmin(active, 4L))
+
+simul_summary <- timeline %>%
+  group_by(active = active_capped) %>%
+  summarise(total_sec = sum(seg_sec), .groups = "drop") %>%
+  mutate(pct_of_time = total_sec / sum(total_sec)) %>%
+  arrange(active)
+
+simul_summary
+# active should now be 0..4 only
+
+simul_summary %>%
+  mutate(
+    `Active ambulances` = active,
+    `Total time (hours)` = round(total_sec / 3600, 1),
+    `% of time` = scales::percent(pct_of_time, accuracy = 0.1)
+  ) %>%
+  select(`Active ambulances`, `Total time (hours)`, `% of time`) %>%
+  kable("html", align = "c", caption = "System Load: Simultaneous Busy Ambulances") %>%
+  kable_styling(full_width = FALSE, position = "center", bootstrap_options = c("striped", "hover"))
+
+# Plot
+ggplot(simul_summary, aes(factor(active), pct_of_time)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Simultaneous busy ambulances", y = "% of observed time",
+       title = "System load: how many ambulances are busy simultaneously (capped at 4)")
+
+# --- 5) Per-unit utilization (unchanged) ---
+util_by_unit <- ems %>%
+  mutate(call_sec = as.numeric(DT.AVAILABLE - DT.DISP, "secs")) %>%
+  group_by(VEH.GRID) %>%
+  summarise(busy_sec = sum(call_sec, na.rm = TRUE), .groups = "drop") %>%
+  mutate(utilization = busy_sec / obs_seconds) %>%
+  arrange(desc(utilization))
+
+util_by_unit
+
+# util_by_unit should already have: VEH.GRID, busy_sec, utilization
+# If you also want color by base, grab a base label for each unit (mode per unit)
+unit_base <- ems %>%
+  count(VEH.GRID, BASE.NAME) %>%
+  group_by(VEH.GRID) %>%
+  slice_max(n, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(VEH.GRID, BASE.NAME)
+
+util_plot <- util_by_unit %>%
+  left_join(unit_base, by = "VEH.GRID") %>%
+  mutate(
+    VEH.GRID = factor(VEH.GRID, levels = rev(VEH.GRID[order(utilization)])),
+    label = scales::percent(utilization, accuracy = 0.1)
+  )
+
+# medic and company matching 
+by_medic_base <- ems |>
+  count(VEH.GRID, BASE.NAME, name = "n_calls") |>
+  group_by(VEH.GRID) |>
+  mutate(pct = n_calls / sum(n_calls)) |>
+  arrange(VEH.GRID, desc(n_calls)) |>
+  ungroup()
+
+# quick look just for Company 1
+by_medic_base |> filter(BASE.NAME == "Company 1")
+
+primary_base <- by_medic_base |>
+  group_by(VEH.GRID) |>
+  slice_max(pct, with_ties = FALSE) |>
+  ungroup() |>
+  select(VEH.GRID, primary_base = BASE.NAME, share_at_primary = pct)
+
+util_by_base <- ems |>
+  mutate(call_sec = as.numeric(DT.AVAILABLE - DT.DISP, "secs")) |>
+  group_by(BASE.NAME) |>
+  summarise(busy_sec = sum(call_sec, na.rm = TRUE), .groups="drop") |>
+  mutate(utilization = busy_sec / obs_seconds)
+
+ggplot(by_medic_base, aes(x = reorder(VEH.GRID, -n_calls), y = pct, fill = BASE.NAME)) +
+  geom_col(width = 0.7, color = "grey20") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "Medic (VEH.GRID)", y = "Share of calls by base",
+       title = "Where each medic runs from (call share by base)") +
+  coord_flip() + theme_minimal(base_size = 12) +
+  theme(panel.grid.major.y = element_blank(), legend.position = "top")
+```
+
 ```{r label = "eda3", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "", fig.show = 'hold'}
 
 ggplot(util_plot, aes(x = VEH.GRID, y = utilization, fill = BASE.NAME)) +
@@ -287,6 +440,126 @@ ggplot(util_plot, aes(x = VEH.GRID, y = utilization, fill = BASE.NAME)) +
 ```
 
 **Figure Four: Examining Overburdening Issue**
+
+```{r, include=FALSE}
+
+TZ <- "America/New_York"
+
+ems_clean <- ems %>%
+  filter(!is.na(DT.DISP), !is.na(DT.AVAILABLE), !is.na(REF.GRID)) %>%
+  mutate(
+    # Normalize to a single local timezone
+    dispatch_time   = with_tz(as.POSIXct(DT.DISP, tz = TZ), tzone = TZ),
+    available_time  = with_tz(as.POSIXct(DT.AVAILABLE, tz = TZ), tzone = TZ),
+    region          = REF.GRID
+  ) %>%
+  filter(dispatch_time < available_time)
+
+PAD_MIN <- 15L
+
+# Max concurrency in [win_start, win_end) using PADDED intervals
+max_conc_in_window_padded <- function(starts, ends, win_start, win_end, pad_min = PAD_MIN) {
+  if (length(starts) == 0) return(0L)
+  starts_pad <- starts - minutes(pad_min)
+  ends_pad   <- ends   + minutes(pad_min)
+
+  keep <- (starts_pad < win_end) & (ends_pad > win_start)
+  if (!any(keep)) return(0L)
+
+  starts_pad <- pmax(starts_pad[keep], win_start)
+  ends_pad   <- pmin(ends_pad[keep],   win_end)
+
+  events <- cbind(
+    time  = c(starts_pad, ends_pad),
+    delta = c(rep(1L, length(starts_pad)), rep(-1L, length(ends_pad)))
+  )
+  events <- events[order(events[, "time"], -events[, "delta"]), , drop = FALSE]
+
+  conc <- 0L; maxc <- 0L
+  for (i in seq_len(nrow(events))) {
+    conc <- conc + events[i, "delta"]
+    if (conc > maxc) maxc <- conc
+  }
+  as.integer(maxc)
+}
+
+# all local dates by dispatch date
+ems_clean <- ems_clean %>%
+  mutate(dispatch_date = as.Date(dispatch_time, tz = TZ))
+
+all_days   <- sort(unique(ems_clean$dispatch_date))
+all_regions <- sort(unique(ems_clean$region))
+
+# create a data frame of all day-hour-region combinations
+grid <- expand.grid(
+  region = all_regions,
+  date   = all_days,
+  hour   = 0:23,
+  KEEP.OUT.ATTRS = FALSE,
+  stringsAsFactors = FALSE
+) %>%
+  mutate(
+    hour_start = as.POSIXct(paste(date, sprintf("%02d:00:00", hour)), tz = TZ),
+    hour_end   = hour_start + hours(1)
+  )
+
+# For each (region, date), restrict calls to those dispatched that date
+concurrency_results <- grid %>%
+  group_by(region, date) %>%
+  group_modify(function(.df, key) {
+    r <- key$region[1]; d <- key$date[1]
+
+    inc <- ems_clean %>%
+      filter(region == r, dispatch_date == d)
+
+    if (nrow(inc) == 0) {
+      .df$max_concurrency <- 0L
+      .df$num_calls <- 0L
+      return(.df)
+    }
+
+    starts <- inc$dispatch_time
+    ends   <- inc$available_time
+
+    # Use PADDED intervals for both metrics
+    .df$max_concurrency <- purrr::pmap_int(
+      list(.df$hour_start, .df$hour_end),
+      ~ max_conc_in_window_padded(starts, ends, ..1, ..2, PAD_MIN)
+    )
+
+    .df$num_calls <- purrr::pmap_int(
+      list(.df$hour_start, .df$hour_end),
+      ~ {
+        s_pad <- starts - minutes(PAD_MIN)
+        e_pad <- ends   + minutes(PAD_MIN)
+        sum(s_pad < ..2 & e_pad > ..1)
+      }
+    )
+
+    .df
+  }) %>%
+  ungroup() %>%
+  mutate(
+    hour_of_day = hour(hour_start),
+    day_of_week = wday(date, label = TRUE),
+    month       = month(date, label = TRUE)
+  )
+
+# Region-level summaries (now dates and hour_start dates are consistent)
+summary_stats <- concurrency_results %>%
+  group_by(region) %>%
+  summarise(
+    mean_max_concurrency   = mean(max_concurrency),
+    median_max_concurrency = median(max_concurrency),
+    max_concurrency_overall = max(max_concurrency),
+    total_hours            = n(),
+    hours_with_calls       = sum(num_calls > 0),
+    .groups = "drop"
+  )
+
+print(summary_stats)
+
+```
 
 ```{r label = "eda4", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "", fig.show = 'hold'}
 
@@ -417,6 +690,21 @@ plot_daily_timeline_stacked(ems_clean, "2024-01-16")
 ```
 
 **Figure Five: Overburdening by Region**
+
+```{r, include=FALSE}
+
+concurrency_results |>
+  ggplot(aes(x = max_concurrency)) +
+  geom_histogram() +
+  facet_wrap(~ region)
+
+concurrency_central <- concurrency_results |>
+  filter(region == "2 Central") |>
+  mutate(overburdened = if_else(max_concurrency > 2, 1, 0))
+
+mean(concurrency_central$overburdened)
+
+```
 
 ```{r label = "eda5", echo = FALSE, warning = FALSE, message = FALSE, fig.show = 'hold'}
 
