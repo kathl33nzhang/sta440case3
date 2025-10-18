@@ -1117,4 +1117,3 @@ if (exists("m8")) {
   cat("* No fitted models found to recommend.\n")
 }
 ```
-

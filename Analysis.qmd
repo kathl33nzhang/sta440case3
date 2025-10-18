@@ -236,6 +236,7 @@ scenario_best_guess |>
   labs(title = "Google Best-Guess Travel Times Under Each Scenario",
        x = NULL, color = "Region")
 ```
+
 ```{r}
 #Focus on North-region calls to understand the magnitude of potential gains
 north_effects <- scenario_summary |>
@@ -361,8 +362,8 @@ events_tbl |>
   count()
 ```
 
-
 NEW EXPERIMENT
+
 ```{r}
 # Load required libraries
 library(tidyverse)
