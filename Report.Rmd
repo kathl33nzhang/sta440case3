@@ -257,6 +257,185 @@ ems %>%
   )
 ```
 
+**Figure Three: Percentage of Ambulance Utilization**
+
 ```{r label = "eda3", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "", fig.show = 'hold'}
 
+ggplot(util_plot, aes(x = VEH.GRID, y = utilization, fill = BASE.NAME)) +
+  geom_col(width = 0.7, color = "grey20") +
+  geom_text(aes(label = label), hjust = -0.1, size = 3.6, color = "grey10") +
+  coord_flip(clip = "off") +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.10))) +
+  scale_fill_brewer(palette = "Set2", na.value = "grey70", name = "Base") +
+  labs(
+    title = "Per-unit utilization over the observation window",
+    subtitle = "Percentage of time each ambulance was busy (dispatch → available)",
+    x = "Ambulance (VEH.GRID)",
+    y = "Utilization"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title.y = element_text(margin = margin(r = 10)),
+    axis.title.x = element_text(margin = margin(t = 6)),
+    plot.title = element_text(face = "bold"),
+    legend.position = "top",
+    legend.title = element_text(face = "bold"),
+    plot.margin = margin(10, 30, 10, 10) # room for labels on the right
+  )
+```
+
+**Figure Four: Examining Overburdening Issue**
+
+```{r label = "eda4", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "", fig.show = 'hold'}
+
+plot_daily_timeline_stacked <- function(data, target_date) {
+  target_date <- as.Date(target_date, tz = TZ)
+
+  daily_data <- data %>%
+    dplyr::filter(as.Date(dispatch_time, tz = TZ) == target_date) %>%
+    dplyr::arrange(region, dispatch_time) %>%
+    dplyr::group_by(region) %>%
+    dplyr::mutate(
+      call_id        = dplyr::row_number(),
+      # Actual (day-anchored)
+      start_time     = as.POSIXct(paste(target_date, format(dispatch_time, "%H:%M:%S")), tz = TZ),
+      end_time_raw   = as.POSIXct(paste(target_date, format(available_time, "%H:%M:%S")), tz = TZ),
+      end_time       = dplyr::if_else(available_time < dispatch_time,
+                                      end_time_raw + lubridate::days(1),
+                                      end_time_raw),
+      # Padded (day-anchored, with spillover handling)
+      start_time_pad = start_time - lubridate::minutes(PAD_MIN),
+      end_time_pad0  = end_time + lubridate::minutes(PAD_MIN),
+      end_time_pad   = end_time_pad0,  # (already aligned to end_time which handled cross-midnight)
+      duration_mins  = as.numeric(difftime(available_time, dispatch_time, units = "mins"))
+    ) %>%
+    dplyr::ungroup()
+
+  if (nrow(daily_data) == 0) {
+    cat("No dispatches found on", as.character(target_date), "across any region.\n")
+    return(invisible(NULL))
+  }
+
+  region_order <- daily_data %>%
+    dplyr::distinct(region) %>%
+    dplyr::arrange(region) %>%
+    dplyr::pull(region)
+
+  daily_data$region <- factor(daily_data$region, levels = region_order)
+
+  region_sizes <- daily_data %>%
+    dplyr::count(region, name = "n_calls") %>%
+    dplyr::arrange(region) %>%
+    dplyr::mutate(offset = dplyr::lag(cumsum(n_calls), default = 0L))
+
+  daily_data <- daily_data %>%
+    dplyr::left_join(region_sizes, by = "region") %>%
+    dplyr::mutate(y_pos = offset + call_id)
+
+  label_positions <- region_sizes %>%
+    dplyr::mutate(y_mid = offset + ceiling(n_calls / 2))
+
+  x_min <- as.POSIXct(paste(target_date, "00:00:00"), tz = TZ)
+  x_max <- max(
+    max(daily_data$end_time_pad, na.rm = TRUE),
+    as.POSIXct(paste(target_date, "23:59:59"), tz = TZ)
+  )
+  max_y <- max(daily_data$y_pos, na.rm = TRUE)
+
+  library(ggplot2)
+  p <- ggplot(daily_data, aes(y = y_pos, color = region)) +
+    # --- PADDED interval (background) ---
+    geom_segment(
+      aes(x = start_time_pad, xend = end_time_pad, yend = y_pos),
+      linewidth = 4, alpha = 0.25
+    ) +
+    geom_point(aes(x = start_time_pad), size = 3, alpha = 0.25) +
+    geom_point(aes(x = end_time_pad),   size = 3, alpha = 0.25) +
+    # --- ACTUAL interval (foreground) ---
+    geom_segment(
+      aes(x = start_time, xend = end_time, yend = y_pos),
+      linewidth = 2, alpha = 0.9
+    ) +
+    geom_point(aes(x = start_time), size = 1.8) +
+    geom_point(aes(x = end_time),   size = 1.8) +
+    # Separators & region labels
+    geom_hline(
+      data = subset(region_sizes, offset > 0),
+      aes(yintercept = offset + 0.5),
+      linewidth = 0.3, alpha = 0.5, inherit.aes = FALSE
+    ) +
+    labs(
+      title = "EMS Dispatch Timelines",
+      subtitle = paste(format(target_date, "%B %d, %Y"), sprintf("— padding = ±%d min", PAD_MIN)),
+      x = "Time of Day",
+      y = "Call # (stacked)",
+      color = "Region",
+      caption = "Thick, faint band = padded window (±15m). Thin, solid band = actual call."
+    ) +
+    scale_x_datetime(
+      limits = c(x_min, x_max),
+      date_labels = "%H",
+      date_breaks = "1 hour",
+      expand = c(0.03, 0.03)
+    ) +
+    scale_y_continuous(
+      breaks = seq(1, max_y, by = 1),
+      minor_breaks = NULL,
+      expand = c(0.02, 0.02)
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(size = 11),
+      panel.grid.minor = element_blank(),
+      axis.text.y = element_text(size = 7)
+    )
+
+  print(p)
+
+  # Optional console summary (unchanged, still based on actual durations)
+  cat("\nSummary by region for", as.character(target_date), ":\n")
+  daily_data %>%
+    dplyr::group_by(region) %>%
+    dplyr::summarise(
+      n_calls = dplyr::n(),
+      avg_duration_min = round(mean(duration_mins), 1),
+      med_duration_min = round(median(duration_mins), 1),
+      min_duration_min = round(min(duration_mins), 1),
+      max_duration_min = round(max(duration_mins), 1),
+      .groups = "drop"
+    ) %>% print(n = Inf)
+
+  invisible(daily_data)
+}
+
+# Example:
+plot_daily_timeline_stacked(ems_clean, "2024-01-16")
+
+```
+
+**Figure Five: Overburdening by Region**
+
+```{r label = "eda5", echo = FALSE, warning = FALSE, message = FALSE, fig.show = 'hold'}
+
+concurrency_central <- concurrency_results |>
+  filter(region == "2 Central") |>
+  mutate(overburdened = if_else(max_concurrency > 2, 1, 0))
+
+counts <- concurrency_results %>%
+  mutate(max_concurrency = as.integer(max_concurrency)) %>%
+  count(region, max_concurrency, name = "n") %>%
+  # fill in missing combos so you always get 3 bars per x (even if some are 0)
+  complete(region, max_concurrency = full_seq(range(max_concurrency, na.rm = TRUE), 1), fill = list(n = 0))
+
+ggplot(counts, aes(x = factor(max_concurrency), y = n, fill = region)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.75) +
+  labs(
+    title = "Counts of Max Concurrency by Region",
+    x = "Max concurrency (per hour)",
+    y = "Number of hours"
+  ) +
+  theme_minimal()
 ```
