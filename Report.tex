@@ -3,6 +3,7 @@
 \PassOptionsToPackage{hyphens}{url}
 %
 \documentclass[
+  11pt,
 ]{article}
 \usepackage{amsmath,amssymb}
 \usepackage{iftex}
@@ -37,16 +38,6 @@
 \makeatother
 \usepackage{xcolor}
 \usepackage[margin=1in]{geometry}
-\usepackage{longtable,booktabs,array}
-\usepackage{calc} % for calculating minipage widths
-% Correct order of tables after \paragraph or \subparagraph
-\usepackage{etoolbox}
-\makeatletter
-\patchcmd\longtable{\par}{\if@noskipsec\mbox{}\fi\par}{}{}
-\makeatother
-% Allow footnotes in longtable head/foot
-\IfFileExists{footnotehyper.sty}{\usepackage{footnotehyper}}{\usepackage{footnote}}
-\makesavenoteenv{longtable}
 \usepackage{graphicx}
 \makeatletter
 \def\maxwidth{\ifdim\Gin@nat@width>\linewidth\linewidth\else\Gin@nat@width\fi}
@@ -63,7 +54,7 @@
 \setlength{\emergencystretch}{3em} % prevent overfull lines
 \providecommand{\tightlist}{%
   \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
-\setcounter{secnumdepth}{-\maxdimen} % remove section numbering
+\setcounter{secnumdepth}{5}
 \usepackage{booktabs}
 \usepackage{longtable}
 \usepackage{array}
@@ -97,6 +88,10 @@
 \begin{document}
 \maketitle
 
+{
+\setcounter{tocdepth}{2}
+\tableofcontents
+}
 \section{Background}\label{background}
 
 Without an effective distribution of emergency medical resources,
@@ -230,9 +225,7 @@ real-world context.
 
 Thus, our final model was:
 
-\[
-\text{sim_time}_{ij} = \beta_0+\sum_{k=1}^4\beta_k\cdot I( \text{Scenario}_j = S_k) +u_i+\epsilon_{ij}
-\]
+\[\text{sim\_time}_{ij} = \beta_0 + \sum_{k=1}^4 \beta_k \cdot I(\text{Scenario}_j = S_k) + u_i + \epsilon_{ij} \]
 
 \[
 u_i \sim N(0, \sigma^2_u)\text{, }\epsilon_{ij} \sim N(0, \sigma^2)
@@ -325,17 +318,6 @@ any waiting non-emergency calls when waiting for the next dispatch.
 \end{figure}
 
 \newpage
-
-\begin{longtable}[]{@{}lrr@{}}
-\toprule\noalign{}
-closer\_north & n & pct \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-Near North & 47 & 0.9 \\
-Far North & 5 & 0.1 \\
-\end{longtable}
 
 \textbf{Figure Two: Comparison of Near vs.~Far North Demand}
 

@@ -66,9 +66,7 @@ We fit a preliminary model with just these two components, but it had a lot of h
 
 Thus, our final model was:
 
-$$
-\text{sim_time}_{ij} = \beta_0+\sum_{k=1}^4\beta_k\cdot I( \text{Scenario}_j = S_k) +u_i+\epsilon_{ij}
-$$
+$$\text{sim\_time}_{ij} = \beta_0 + \sum_{k=1}^4 \beta_k \cdot I(\text{Scenario}_j = S_k) + u_i + \epsilon_{ij} $$
 
 $$
 u_i \sim N(0, \sigma^2_u)\text{, }\epsilon_{ij} \sim N(0, \sigma^2)
@@ -344,8 +342,12 @@ simul_summary %>%
     `% of time` = scales::percent(pct_of_time, accuracy = 0.1)
   ) %>%
   select(`Active ambulances`, `Total time (hours)`, `% of time`) %>%
-  kable("html", align = "c", caption = "System Load: Simultaneous Busy Ambulances") %>%
-  kable_styling(full_width = FALSE, position = "center", bootstrap_options = c("striped", "hover"))
+  knitr::kable(format = "latex",
+               align = "c",
+               booktabs = TRUE,
+               caption = "System Load: Simultaneous Busy Ambulances") %>%
+  kableExtra::kable_styling(full_width = FALSE, position = "center",
+                            latex_options = c("hold_position","scale_down","striped"))
 
 # Plot
 ggplot(simul_summary, aes(factor(active), pct_of_time)) +
