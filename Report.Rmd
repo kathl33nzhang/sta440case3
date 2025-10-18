@@ -22,13 +22,15 @@ Our goal is to determine which North station location would most effectively red
 
 ## Data
 
-<!-- Talk about Duke Hospital outlier removed, how we handled NAs, etc. -->
+<!-- Talk about Duke Hospital outlier removed, how we handled NAs, etc., add reasoning on why we chose UA -->
 
 We were given 489 observations of calls occurring in Vance County between January 1st to January 25th in 2024.
 
 One of the calls went to Duke Hospital, which we excluded. Additionally, in certain incidents where multiple patients were involved, they would be transported in the same ambulance. As we only care about the availability of ambulances and not how many patients were in a single ambulance, we cleaned the dataset so that every identical row represented a single, unique incident involving one ambulance. The identical condition ensured datapoints where multiple ambulances were sent out for one incident with multiple patients would still be in the dataset, as it would impact ambulance load.
 
 ## Exploratory Data Analysis
+
+To understand where and when ambulance demand occurs, our EDA began with plotting a call-density map (Figure 1) that showed a clear cluster around the Central station with spread in the South and scatter in the North, motivating scenarios that add northern coverage. We then compared Near North vs. Far North (Figure 2) calls, and found that using Google's UA travel times, Near North was closer for 90% of northern calls, cut response time by about 4 minutes on average relative to Far North, and had shorter total call duration with quicker transportation to hospitals.
 
 # Modeling
 
@@ -150,6 +152,8 @@ ems <- x |>
   )
 ```
 
+**Figure One: Density of Calls in Vance County**
+
 ```{r label = "eda1", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "EMS call density across Vance County (geographically)", fig.show = 'hold'}
 
 ems_plot <- data.frame(
@@ -220,6 +224,8 @@ xtable(north_choice,
        label = "tab:north_choice") |>
   xtable2kable()
 ```
+
+**Figure Two: Comparison of Near vs. Far North Demand**
 
 ```{r label = "eda2_2", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "test", fig.show = 'hold'}
 
