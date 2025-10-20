@@ -6,7 +6,7 @@ output:
   pdf_document:
     latex_engine: xelatex
     number_sections: true
-    toc: true
+    # toc: true
 fontsize: 11pt
 geometry: margin=1in
 df_print: kable
@@ -16,45 +16,39 @@ df_print: kable
 
 # Background
 
-Without an effective distribution of emergency medical resources, counties risk delayed response times that can mean the difference between life and death. To improve coverage across Vance County, researchers analyzed data from the county’s EMS system, which currently operates four ambulances from two stations located in the Central and South districts. Historical records show that residents in the North district face much longer response times, often averaging over 12 minutes, compared to 6 and 9 minutes in the Central and South regions.
+The current Vance County EMS configuration places all four ambulances at two existing bases in the Central and South districts, which has produced a systematic performance gap in the Northern district where calls incur materially longer response times. The county is considering establishing a third station in the North, at either a Near North or Far North site, together with a reallocation of the four ambulances across stations.
 
-Using a dataset of recorded EMS trips containing call locations, dispatch and arrival times, and Google API travel estimates, this analysis evaluates how different station configurations and vehicle allocations affect system performance. The county is considering establishing a new station in the North district, with two potential site options (Near North and Far North), and several ambulance distribution scenarios.
+We analyzed the historical calls to evaluate the 4 new scenarios, guided by three key criteria: (1) expected travel time under each scenario, (2) system load, measured through unit availability and concurrency of busy ambulances, and (3) how often the nominal closest station is actually able to serve a call at dispatch.
 
-Our goal is to determine which North station location would most effectively reduce response times and how the four available ambulances should be allocated among the stations to balance coverage and minimize system strain. We aim to illustrate this through visual and numerical summaries that highlight tradeoffs in travel time and resource availability across the scenarios.
+We evaluated each call scenario using estimated travel times and the observed service durations and compare performance across the three criteria to determine which North location and ambulance allocation best improves coverage for the county.
 
-# Data and Exploratory Analysis
+## The Data
 
-## Data
+The dataset contains 489 EMS incidents recorded between January 1–25, 2024. One record corresponding to a transport to Duke Hospital was excluded, since it falls outside the county of interest and was abnormally long. In incidents with multiple patients transported in the same ambulance, duplicate records appear. Because the analysis concerns ambulance availability rather than patient count, we collapsed these duplicates so that each row represents a unique ambulance-level incident, while preserving separate rows when distinct ambulances responded to the same scene, since those affect system load.
 
-<!-- Talk about Duke Hospital outlier removed, how we handled NAs, etc., add reasoning on why we chose UA -->
-
-We were given 489 observations of calls occurring in Vance County between January 1st to January 25th in 2024.
-
-One of the calls went to Duke Hospital, which we excluded. Additionally, in certain incidents where multiple patients were involved, they would be transported in the same ambulance. As we only care about the availability of ambulances and not how many patients were in a single ambulance, we cleaned the dataset so that every identical row represented a single, unique incident involving one ambulance. The identical condition ensured datapoints where multiple ambulances were sent out for one incident with multiple patients would still be in the dataset, as it would impact ambulance load.
+For each incident, the data include the call location (latitude/longitude), dispatch, arrival, hospital, and clear timestamps, the assigned base under the current system, and Google-estimated travel times from each candidate station (South, Central, Near North, Far North). The Google estimates are provided under several traffic assumptions (optimistic, best-guess, pessimistic); we use the best-guess estimates in the simulation to reflect a typical operating regime. Hospital destination and service-duration fields are retained only to compute how long a unit remains busy after dispatch, which enters the system-load and queueing components of the analysis.
 
 ## Exploratory Data Analysis
 
-To understand where and when ambulance demand occurs, our EDA began with plotting a call-density map (Figure 1) that showed a clear cluster around the Central station with spread in the South and scatter in the North, motivating scenarios that add northern coverage. We then compared Near North vs. Far North (Figure 2) calls, and found that using Google's UA travel times, Near North was closer for 90% of northern calls, cut response time by about 4 minutes on average relative to Far North, and had shorter total call duration with quicker transportation to hospitals.
+We began by examining the spatial distribution of incidents. As shown in Figure 1, calls were densely concentrated near the current Central station, with a smaller secondary cluster around the South station. Calls also extended into the northern part of the county in a dispersed band, indicating sustained call activity in a region with no current station presence and motivating evaluation of a northern site.
+
+Next, we compared the two candidate North locations using unadjusted Google travel times for calls originating in the North. As shown in Table 1, the Near North site was closer for over 90% of northern calls. Figure 2 further showed shorter response time, shorter total call duration, and faster hospital transport relative to Far North, providing initial evidence in favor of Near North conditional on establishing a station in the North.
+
+We then examined unit-level workload. Figure 3 shows that centrally based units dominated utilization, with Medics 6 and 7 alone accounting for roughly one-third of observed busy time, while South-based units were seldom in service. This asymmetry reflects the earlier spatial concentration and indicates that the current layout leaves some units persistently near capacity.
+
+To assess temporal pressure, we examined concurrent activity. Figure 4 illustrates episodes where multiple Central calls were active while a North call occurred simultaneously, implying that the nearest units were already engaged. We therefore quantified concurrency over the full window. As shown in Figure 5, Central exhibited both the highest typical concurrency and the widest tail. Although concurrency in the North was rare overall, 17.3% of North calls occurred during hours with at least three active Central calls, meaning that when North demand does arise, it often coincides with a period when nearby resources are already heavily committed.
 
 # Modeling
 
 ## Simulating the Data
 
-The objectives are to compare different scenarios to determine the optimal options for station placement as well as ambulance allocations, but we do not have data about ambulance response times under different station locations and ambulance allocations. As a result, we conducted a simulation that would simulate response times for each of the five scenarios for every single call in our cleaned dataset, resulting in 5 observations for every original call.
+The objectives are to compare the five candidate scenarios to determine the optimal options for station placement and ambulance allocation. Because we do not observe response times under unimplemented layouts, we conducted a simulation that generates response times for each scenario for every call in the cleaned dataset, resulting in five simulated observations per original incident.
 
-We developed Scenario Dispatch Rules that would govern how the simulation responded to different scenarios.
+We constructed a set of Scenario Dispatch Rules to govern how incidents are handled under each configuration. From exploratory analysis, we determined that the simulation must allow for the possibility that no ambulance is free when a call arrives. Under the rules, each incoming call first checks whether any units are available. If at least one unit is free, the system assigns the closest available one, using Google’s best-guess estimated travel time from station to call location; this yields a wait time of zero. If all units are busy, the call enters a queue and waits until the next ambulance becomes free; that waiting time is then added to the total response time. Once dispatched, a unit remains occupied for the observed duration of the incident and then becomes available for future calls.
 
-From our exploratory data analysis, we determined that we wanted to consider scenarios where an ambulance might not be available. Therefore, in our rules, each incoming call first checks whether any ambulances are currently available. If at least one unit is free, the system assigns the closest available unit — the one with the smallest estimated travel time, based on Google’s best-guess ETA between that station and the call location, resulting in 0 wait time. If all units are busy, the call enters a queue and waits until the next ambulance becomes free. That waiting time is then added to the total response time. Once assigned, each unit stays occupied for the observed duration of the call, and then becomes available again for the next incident.
+Wait time is therefore determined entirely by availability at arrival. If one or more units are free, the closest (minimum ETA) unit is dispatched immediately with zero wait. If all units are busy, the unit scheduled to become free soonest is assigned, and the wait time is the difference between the call time and that unit’s release time. In both cases, subsequent availability is updated by adding the observed service duration to that unit’s departure time.
 
-The wait time is determined by whether or not an ambulance unit is available at the moment an incident call comes in. This models the effect of queueing for service. The wait time is calculated based on two conditions:
-
-If one or more units are already free when the call arrives, we assign the closest available unit, which is the one with minimum ETA. The unit is dispatched immediately at the call time, resulting in zero wait time.
-
-Otherwise, if all units are busy when the call arrives, we assign the unit that is scheduled to become free soonest. The wait time is the time difference between the call time and the departure time, which is the time the assigned unit finally becomes free. This represents the queueing delay. In both cases, the unit's subsequent availability is updated by adding the observed service duration to its departure time, making the unit busy for the duration of the incident.
-
-Finally, we calculate Total Response Time or simulated time as Wait Time + Travel Time.
-
-We filtered the results to exclude extremely long simulated times (above 2000 seconds) to focus on more likely outcomes. We also added a variable, “switched”, which determines if the ambulance assigned in a new scenario (S1−S4) is different from the baseline assignment (S0).
+Total simulated response time is computed as wait time + travel time. We excluded simulated values above 2000 seconds to remove extreme, low-plausibility outcomes. We additionally created a “switched” indicator flagging whether the assigned station under a given scenario (S1–S4) differs from the baseline assignment (S0).
 
 ## Model Selection and Rationale
 
@@ -66,7 +60,10 @@ We fit a preliminary model with just these two components, but it had a lot of h
 
 Thus, our final model was:
 
-$$\text{sim\_time}_{ij} = \beta_0 + \sum_{k=1}^4 \beta_k \cdot I(\text{Scenario}_j = S_k) + u_i + \epsilon_{ij} $$
+\[
+\mathrm{sim\_time}_{ij}
+= \beta_0 + \sum_{k=1}^4 \beta_k I(\text{Scenario}_j = S_k) + u_i + \epsilon_{ij}
+\]
 
 $$
 u_i \sim N(0, \sigma^2_u)\text{, }\epsilon_{ij} \sim N(0, \sigma^2)
@@ -74,15 +71,13 @@ $$
 
 where $\sigma^2_j = \sigma^2 \cdot\delta^2_j$
 
-$\text{sim_time}_{ij}$ is the simulated response time for the $i$-th Incident ID under the $j$-th Scenario.
+$sim\_time_{ij}$ is the simulated response time for the $i$-th Incident ID under the $j$-th Scenario.
 
 $u_i$ is the random intercept for the $i$-th Incident ID. $\sigma^2_j$ is the residual variance specific to the $j$-th Scenario, which is impacted by our variance parameter $\delta_j^2$ that scales the baseline variance for Scenario $j$.
 
-## Model Implementation
+## Model Implementation and Evaluation
 
 Linear mixed models were fit in R using the `nlme` package. Additionally, we ended up dropping data where simulated time was the same across all scenarios in order to focus on the effect of changes resulting from the different Scenarios.
-
-## Model Evaluation
 
 Dropping the data where simulated time was the same across all scenarios resulted in a lower AIC and BIC of the model fitted on the reduced dataset compared to the non-reduced dataset.
 
@@ -90,7 +85,7 @@ We also examined a QQ plot which appears approximately normal. Our Normalized Re
 
 We also looked at the Residuals vs Fitted by Scenario, where the points in red indicate calls where the assigned station under the simulation was different from the assigned station in our original dataset.
 
-# Model Results
+## Model Results
 
 The intercept term is the estimated mean simulated total response time for the reference group, Scenario 0, which is the current distribution of ambulances and stations. The mean response time in S0 is approximately 470.22 seconds or 7 minutes, 50 seconds. This value is highly significant, with a p-value \< 0.001 .
 
@@ -98,13 +93,11 @@ The mean simulated total response time in Scenario 3 is estimated to be 60.96 se
 
 # Conclusion, Shortcomings and Future Work
 
-## Conclusion
-
 After evaluating five ambulance deployment layouts across the county by replaying the same 489 incidents under each scenario with a dispatch rule (sending the closest available unit, if none are free, dispact the next free unit when it is available), our analysis showed that Scenario 3, which locates one ambulance in the Near North, two ambulances in the Central, and one ambulance in the South, perfomed best. Across mean and median response times, Scenario 3 reduced average response time the most and produced the highest share of calls meeting eight and ten minute targets. These results are consistent with intuition, where a more balanced coverage of the county opposed to a centralized fleet lowers typical responses and extreme delays.
 
-## Limitations and Future Work
-
 However, one limitation to our analysis is the travel-time realism- we used Google's unadjusted ETAs and treated them as fixed, so rush hour, weather, and road disruptions are not modeled, which underestimates our variability. Additionally, there was no priority handling and all calls were treated the same, so our model is limited in analyzing how our layouts affect critical cases vs. low-priority calls. In the future, additional work would involve adding time-of-day factors to travel by multiplying ETAs by peak/off-peak multipliers, and running two queues for emergency and non-emergency, allowing emergencies to jump ahead of any waiting non-emergency calls when waiting for the next dispatch.
+
+\newpage
 
 # Appendix
 
@@ -157,9 +150,9 @@ ems <- x |>
   )
 ```
 
-**Figure One: Density of Calls in Vance County**
+**Figure 1: Density of Calls in Vance County**
 
-```{r label = "eda1", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "EMS call density across Vance County (geographically)", fig.show = 'hold'}
+```{r label = "eda1", echo = FALSE, warning = FALSE, message = FALSE, fig.show = 'hold'}
 
 ems_plot <- data.frame(
   lon = as.numeric(x$REF.GPS.LON),
@@ -204,6 +197,8 @@ ggplot(ems_plot, aes(lon, lat)) +
 
 \newpage
 
+**Table 1: Proportion of North Calls Closer to Near vs Far North**
+
 ```{r label = "eda2_1", echo = FALSE, warning = FALSE, message = FALSE, fig.show = 'hold'}
 
 ems <- ems |>
@@ -224,20 +219,25 @@ north_choice <- ems |>
   count(closer_north) |>
   mutate(pct = n / sum(n))
 
+north_choice |>
+  kable(
+    digits = 3,
+    col.names = c("Closer Station","Count","Proportion")
+  )
 ```
 
-**Figure Two: Comparison of Near vs. Far North Demand**
+**Figure 2: Comparison of Near vs. Far North Demand**
 
-```{r label = "eda2_2", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "test", fig.show = 'hold'}
+```{r label = "eda2_2", echo = FALSE, warning = FALSE, message = FALSE, fig.show = 'hold'}
 
-ems %>%
-  filter(REF.GRID == "North") %>%
-  select(closer_north, response_time_min, to_hospital_min, total_call_min) %>%
-  pivot_longer(-closer_north, names_to = "stage", values_to = "minutes") %>%
+ems |>
+  filter(REF.GRID == "North") |>
+  select(closer_north, response_time_min, to_hospital_min, total_call_min) |>
+  pivot_longer(-closer_north, names_to = "stage", values_to = "minutes") |>
   mutate(stage = recode(stage,
                         response_time_min = "Response Time",
                         to_hospital_min   = "Transport to Hospital",
-                        total_call_min    = "Total Call Duration")) %>%
+                        total_call_min    = "Total Call Duration")) |>
   ggplot(aes(x = closer_north, y = minutes, fill = closer_north)) +
   geom_boxplot(width = 0.6, outlier.alpha = 0.15) +
   facet_wrap(~ stage, scales = "free_y", nrow = 1) +
@@ -258,24 +258,26 @@ ems %>%
   )
 ```
 
-**Figure Three: Percentage of Ambulance Utilization**
+\newpage
+
+**Figure 3: Percentage of Ambulance Utilization**
 
 ```{r, include=FALSE}
 
 # --- 0) Clean datetimes & keep valid intervals ---
-ems <- ems %>%
+ems <- ems |>
   mutate(
     DT.DISP      = as_datetime(DT.DISP),
     DT.AVAILABLE = as_datetime(DT.AVAILABLE)
-  ) %>%
+  ) |>
   filter(!is.na(VEH.GRID), !is.na(DT.DISP), !is.na(DT.AVAILABLE),
          DT.AVAILABLE >= DT.DISP)
 
 # If two calls for the same ambulance overlap (due to logging quirks, delays, or bad timestamps), the code double-counts that unit as busy twice at the same time.
-ems %>%
-  arrange(VEH.GRID, DT.DISP) %>%
-  group_by(VEH.GRID) %>%
-  mutate(overlap = DT.DISP < lag(DT.AVAILABLE)) %>%
+ems |>
+  arrange(VEH.GRID, DT.DISP) |>
+  group_by(VEH.GRID) |>
+  mutate(overlap = DT.DISP < lag(DT.AVAILABLE)) |>
   filter(overlap == TRUE)
 
 # Distinct vehicles present (sanity)
@@ -289,63 +291,63 @@ obs_seconds <- as.numeric(t_end - t_start, units = "secs")
 
 # --- 1) Merge overlapping intervals within each vehicle ---
 # Convert to numeric seconds for cummax, then back to POSIXct
-ems_intervals <- ems %>%
+ems_intervals <- ems |>
   transmute(VEH.GRID,
             start_num = as.numeric(DT.DISP),
-            end_num   = as.numeric(DT.AVAILABLE)) %>%
-  arrange(VEH.GRID, start_num, end_num) %>%
-  group_by(VEH.GRID) %>%
+            end_num   = as.numeric(DT.AVAILABLE)) |>
+  arrange(VEH.GRID, start_num, end_num) |>
+  group_by(VEH.GRID) |>
   mutate(
     prev_cummax_end = lag(cummax(end_num), default = first(start_num) - 1),
     new_block = start_num > prev_cummax_end,
     block_id  = cumsum(new_block)
-  ) %>%
-  group_by(VEH.GRID, block_id) %>%
+  ) |>
+  group_by(VEH.GRID, block_id) |>
   summarise(start_num = min(start_num),
             end_num   = max(end_num),
-            .groups = "drop") %>%
+            .groups = "drop") |>
   mutate(start = as_datetime(start_num),
-         end   = as_datetime(end_num)) %>%
-  select(VEH.GRID, start, end) %>%
+         end   = as_datetime(end_num)) |>
+  select(VEH.GRID, start, end) |>
   arrange(VEH.GRID, start, end)
 
 # --- 2) Build global event timeline (+1 at start, -1 at end) ---
-events <- ems_intervals %>%
-  pivot_longer(c(start, end), names_to = "etype", values_to = "time") %>%
-  mutate(delta = if_else(etype == "start", 1L, -1L)) %>%
+events <- ems_intervals |>
+  pivot_longer(c(start, end), names_to = "etype", values_to = "time") |>
+  mutate(delta = if_else(etype == "start", 1L, -1L)) |>
   arrange(time, desc(delta))   # process -1 before +1 at identical timestamps
 
-timeline <- events %>%
-  transmute(time, delta) %>%
-  arrange(time) %>%
+timeline <- events |>
+  transmute(time, delta) |>
+  arrange(time) |>
   mutate(active = cumsum(delta),
          time_next = lead(time),
-         seg_sec   = as.numeric(time_next - time, "secs")) %>%
+         seg_sec   = as.numeric(time_next - time, "secs")) |>
   filter(!is.na(time_next), seg_sec > 0)
 
 # --- 3) Duration-weighted summary of simultaneous busy vehicles (capped at 4) ---
-timeline <- timeline %>% mutate(active_capped = pmin(active, 4L))
+timeline <- timeline |> mutate(active_capped = pmin(active, 4L))
 
-simul_summary <- timeline %>%
-  group_by(active = active_capped) %>%
-  summarise(total_sec = sum(seg_sec), .groups = "drop") %>%
-  mutate(pct_of_time = total_sec / sum(total_sec)) %>%
+simul_summary <- timeline |>
+  group_by(active = active_capped) |>
+  summarise(total_sec = sum(seg_sec), .groups = "drop") |>
+  mutate(pct_of_time = total_sec / sum(total_sec)) |>
   arrange(active)
 
 simul_summary
 # active should now be 0..4 only
 
-simul_summary %>%
+simul_summary |>
   mutate(
     `Active ambulances` = active,
     `Total time (hours)` = round(total_sec / 3600, 1),
     `% of time` = scales::percent(pct_of_time, accuracy = 0.1)
-  ) %>%
-  select(`Active ambulances`, `Total time (hours)`, `% of time`) %>%
+  ) |>
+  select(`Active ambulances`, `Total time (hours)`, `% of time`) |>
   knitr::kable(format = "latex",
                align = "c",
                booktabs = TRUE,
-               caption = "System Load: Simultaneous Busy Ambulances") %>%
+               caption = "System Load: Simultaneous Busy Ambulances") |>
   kableExtra::kable_styling(full_width = FALSE, position = "center",
                             latex_options = c("hold_position","scale_down","striped"))
 
@@ -357,26 +359,26 @@ ggplot(simul_summary, aes(factor(active), pct_of_time)) +
        title = "System load: how many ambulances are busy simultaneously (capped at 4)")
 
 # --- 5) Per-unit utilization (unchanged) ---
-util_by_unit <- ems %>%
-  mutate(call_sec = as.numeric(DT.AVAILABLE - DT.DISP, "secs")) %>%
-  group_by(VEH.GRID) %>%
-  summarise(busy_sec = sum(call_sec, na.rm = TRUE), .groups = "drop") %>%
-  mutate(utilization = busy_sec / obs_seconds) %>%
+util_by_unit <- ems |>
+  mutate(call_sec = as.numeric(DT.AVAILABLE - DT.DISP, "secs")) |>
+  group_by(VEH.GRID) |>
+  summarise(busy_sec = sum(call_sec, na.rm = TRUE), .groups = "drop") |>
+  mutate(utilization = busy_sec / obs_seconds) |>
   arrange(desc(utilization))
 
 util_by_unit
 
 # util_by_unit should already have: VEH.GRID, busy_sec, utilization
 # If you also want color by base, grab a base label for each unit (mode per unit)
-unit_base <- ems %>%
-  count(VEH.GRID, BASE.NAME) %>%
-  group_by(VEH.GRID) %>%
-  slice_max(n, with_ties = FALSE) %>%
-  ungroup() %>%
+unit_base <- ems |>
+  count(VEH.GRID, BASE.NAME) |>
+  group_by(VEH.GRID) |>
+  slice_max(n, with_ties = FALSE) |>
+  ungroup() |>
   select(VEH.GRID, BASE.NAME)
 
-util_plot <- util_by_unit %>%
-  left_join(unit_base, by = "VEH.GRID") %>%
+util_plot <- util_by_unit |>
+  left_join(unit_base, by = "VEH.GRID") |>
   mutate(
     VEH.GRID = factor(VEH.GRID, levels = rev(VEH.GRID[order(utilization)])),
     label = scales::percent(utilization, accuracy = 0.1)
@@ -414,7 +416,7 @@ ggplot(by_medic_base, aes(x = reorder(VEH.GRID, -n_calls), y = pct, fill = BASE.
   theme(panel.grid.major.y = element_blank(), legend.position = "top")
 ```
 
-```{r label = "eda3", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "", fig.show = 'hold'}
+```{r label = "eda3", echo = FALSE, warning = FALSE, message = FALSE, fig.show = 'hold'}
 
 ggplot(util_plot, aes(x = VEH.GRID, y = utilization, fill = BASE.NAME)) +
   geom_col(width = 0.7, color = "grey20") +
@@ -441,20 +443,22 @@ ggplot(util_plot, aes(x = VEH.GRID, y = utilization, fill = BASE.NAME)) +
   )
 ```
 
-**Figure Four: Examining Overburdening Issue**
+\newpage
+
+**Figure 4: Examining Overburdening Issue**
 
 ```{r, include=FALSE}
 
 TZ <- "America/New_York"
 
-ems_clean <- ems %>%
-  filter(!is.na(DT.DISP), !is.na(DT.AVAILABLE), !is.na(REF.GRID)) %>%
+ems_clean <- ems |>
+  filter(!is.na(DT.DISP), !is.na(DT.AVAILABLE), !is.na(REF.GRID)) |>
   mutate(
     # Normalize to a single local timezone
     dispatch_time   = with_tz(as.POSIXct(DT.DISP, tz = TZ), tzone = TZ),
     available_time  = with_tz(as.POSIXct(DT.AVAILABLE, tz = TZ), tzone = TZ),
     region          = REF.GRID
-  ) %>%
+  ) |>
   filter(dispatch_time < available_time)
 
 PAD_MIN <- 15L
@@ -486,7 +490,7 @@ max_conc_in_window_padded <- function(starts, ends, win_start, win_end, pad_min 
 }
 
 # all local dates by dispatch date
-ems_clean <- ems_clean %>%
+ems_clean <- ems_clean |>
   mutate(dispatch_date = as.Date(dispatch_time, tz = TZ))
 
 all_days   <- sort(unique(ems_clean$dispatch_date))
@@ -499,19 +503,19 @@ grid <- expand.grid(
   hour   = 0:23,
   KEEP.OUT.ATTRS = FALSE,
   stringsAsFactors = FALSE
-) %>%
+) |>
   mutate(
     hour_start = as.POSIXct(paste(date, sprintf("%02d:00:00", hour)), tz = TZ),
     hour_end   = hour_start + hours(1)
   )
 
 # For each (region, date), restrict calls to those dispatched that date
-concurrency_results <- grid %>%
-  group_by(region, date) %>%
+concurrency_results <- grid |>
+  group_by(region, date) |>
   group_modify(function(.df, key) {
     r <- key$region[1]; d <- key$date[1]
 
-    inc <- ems_clean %>%
+    inc <- ems_clean |>
       filter(region == r, dispatch_date == d)
 
     if (nrow(inc) == 0) {
@@ -539,8 +543,8 @@ concurrency_results <- grid %>%
     )
 
     .df
-  }) %>%
-  ungroup() %>%
+  }) |>
+  ungroup() |>
   mutate(
     hour_of_day = hour(hour_start),
     day_of_week = wday(date, label = TRUE),
@@ -548,8 +552,8 @@ concurrency_results <- grid %>%
   )
 
 # Region-level summaries (now dates and hour_start dates are consistent)
-summary_stats <- concurrency_results %>%
-  group_by(region) %>%
+summary_stats <- concurrency_results |>
+  group_by(region) |>
   summarise(
     mean_max_concurrency   = mean(max_concurrency),
     median_max_concurrency = median(max_concurrency),
@@ -559,19 +563,19 @@ summary_stats <- concurrency_results %>%
     .groups = "drop"
   )
 
-print(summary_stats)
+# print(summary_stats)
 
 ```
 
-```{r label = "eda4", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "", fig.show = 'hold'}
+```{r label = "eda4", echo = FALSE, warning = FALSE, message = FALSE, fig.show = 'hold'}
 
 plot_daily_timeline_stacked <- function(data, target_date) {
   target_date <- as.Date(target_date, tz = TZ)
 
-  daily_data <- data %>%
-    dplyr::filter(as.Date(dispatch_time, tz = TZ) == target_date) %>%
-    dplyr::arrange(region, dispatch_time) %>%
-    dplyr::group_by(region) %>%
+  daily_data <- data |>
+    dplyr::filter(as.Date(dispatch_time, tz = TZ) == target_date) |>
+    dplyr::arrange(region, dispatch_time) |>
+    dplyr::group_by(region) |>
     dplyr::mutate(
       call_id        = dplyr::row_number(),
       # Actual (day-anchored)
@@ -585,7 +589,7 @@ plot_daily_timeline_stacked <- function(data, target_date) {
       end_time_pad0  = end_time + lubridate::minutes(PAD_MIN),
       end_time_pad   = end_time_pad0,  # (already aligned to end_time which handled cross-midnight)
       duration_mins  = as.numeric(difftime(available_time, dispatch_time, units = "mins"))
-    ) %>%
+    ) |>
     dplyr::ungroup()
 
   if (nrow(daily_data) == 0) {
@@ -593,23 +597,23 @@ plot_daily_timeline_stacked <- function(data, target_date) {
     return(invisible(NULL))
   }
 
-  region_order <- daily_data %>%
-    dplyr::distinct(region) %>%
-    dplyr::arrange(region) %>%
+  region_order <- daily_data |>
+    dplyr::distinct(region) |>
+    dplyr::arrange(region) |>
     dplyr::pull(region)
 
   daily_data$region <- factor(daily_data$region, levels = region_order)
 
-  region_sizes <- daily_data %>%
-    dplyr::count(region, name = "n_calls") %>%
-    dplyr::arrange(region) %>%
+  region_sizes <- daily_data |>
+    dplyr::count(region, name = "n_calls") |>
+    dplyr::arrange(region) |>
     dplyr::mutate(offset = dplyr::lag(cumsum(n_calls), default = 0L))
 
-  daily_data <- daily_data %>%
-    dplyr::left_join(region_sizes, by = "region") %>%
+  daily_data <- daily_data |>
+    dplyr::left_join(region_sizes, by = "region") |>
     dplyr::mutate(y_pos = offset + call_id)
 
-  label_positions <- region_sizes %>%
+  label_positions <- region_sizes |>
     dplyr::mutate(y_mid = offset + ceiling(n_calls / 2))
 
   x_min <- as.POSIXct(paste(target_date, "00:00:00"), tz = TZ)
@@ -671,19 +675,19 @@ plot_daily_timeline_stacked <- function(data, target_date) {
   print(p)
 
   # Optional console summary (unchanged, still based on actual durations)
-  cat("\nSummary by region for", as.character(target_date), ":\n")
-  daily_data %>%
-    dplyr::group_by(region) %>%
-    dplyr::summarise(
-      n_calls = dplyr::n(),
-      avg_duration_min = round(mean(duration_mins), 1),
-      med_duration_min = round(median(duration_mins), 1),
-      min_duration_min = round(min(duration_mins), 1),
-      max_duration_min = round(max(duration_mins), 1),
-      .groups = "drop"
-    ) %>% print(n = Inf)
-
-  invisible(daily_data)
+  # cat("\nSummary by region for", as.character(target_date), ":\n")
+  # daily_data |>
+  #   dplyr::group_by(region) |>
+  #   dplyr::summarise(
+  #     n_calls = dplyr::n(),
+  #     avg_duration_min = round(mean(duration_mins), 1),
+  #     med_duration_min = round(median(duration_mins), 1),
+  #     min_duration_min = round(min(duration_mins), 1),
+  #     max_duration_min = round(max(duration_mins), 1),
+  #     .groups = "drop"
+  #   ) |> print(n = Inf)
+  # 
+  # invisible(daily_data)
 }
 
 # Example:
@@ -691,7 +695,9 @@ plot_daily_timeline_stacked(ems_clean, "2024-01-16")
 
 ```
 
-**Figure Five: Overburdening by Region**
+\newpage
+
+**Figure 5: Overburdening by Region**
 
 ```{r, include=FALSE}
 
@@ -714,9 +720,9 @@ concurrency_central <- concurrency_results |>
   filter(region == "2 Central") |>
   mutate(overburdened = if_else(max_concurrency > 2, 1, 0))
 
-counts <- concurrency_results %>%
-  mutate(max_concurrency = as.integer(max_concurrency)) %>%
-  count(region, max_concurrency, name = "n") %>%
+counts <- concurrency_results |>
+  mutate(max_concurrency = as.integer(max_concurrency)) |>
+  count(region, max_concurrency, name = "n") |>
   # fill in missing combos so you always get 3 bars per x (even if some are 0)
   complete(region, max_concurrency = full_seq(range(max_concurrency, na.rm = TRUE), 1), fill = list(n = 0))
 
