@@ -200,11 +200,7 @@ ems <- x |>
 ```{r fig-1, echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "EMS call density across Vance County (geographically)", fig.show = 'hold'}
 #| echo: false
 #| message: false
-=======
-**Figure 1: Density of Calls in Vance County**
 
-```{r label = "eda1", echo = FALSE, warning = FALSE, message = FALSE, fig.show = 'hold'}
->>>>>>> 9b8e6b4025cdf00cfe50d87676c0d252cefc1cd4
 
 ems_plot <- data.frame(
   lon = as.numeric(x$REF.GPS.LON),
@@ -246,16 +242,9 @@ ggplot(ems_plot, aes(lon, lat)) +
     legend.key.height = unit(0.6, "cm")
   )
 ```
-
+\newpage
 <<<<<<< HEAD
 ```{r, include = FALSE}
-=======
-\newpage
-
-**Table 1: Proportion of North Calls Closer to Near vs Far North**
-
-```{r label = "eda2_1", echo = FALSE, warning = FALSE, message = FALSE, fig.show = 'hold'}
->>>>>>> 9b8e6b4025cdf00cfe50d87676c0d252cefc1cd4
 
 ems <- ems |>
   mutate(
@@ -286,11 +275,6 @@ north_choice |>
 ```{r fig-2, echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "Comparison of Near vs. Far North demand", fig.show = 'hold'}
 #| echo: false
 #| message: false
-=======
-**Figure 2: Comparison of Near vs. Far North Demand**
-
-```{r label = "eda2_2", echo = FALSE, warning = FALSE, message = FALSE, fig.show = 'hold'}
->>>>>>> 9b8e6b4025cdf00cfe50d87676c0d252cefc1cd4
 
 ems |>
   filter(REF.GRID == "North") |>
@@ -404,9 +388,9 @@ simul_summary
 
 simul_summary |>
   mutate(
-    `Active ambulances` = active,
-    `Total time (hours)` = round(total_sec / 3600, 1),
-    `% of time` = scales::percent(pct_of_time, accuracy = 0.1)
+    Active ambulances = active,
+    Total time (hours)` = round(total_sec / 3600, 1),
+    % of time = scales::percent(pct_of_time, accuracy = 0.1)
   ) |>
   select(`Active ambulances`, `Total time (hours)`, `% of time`) |>
   knitr::kable(format = "latex",
@@ -485,9 +469,6 @@ ggplot(by_medic_base, aes(x = reorder(VEH.GRID, -n_calls), y = pct, fill = BASE.
 ```{r, fig-3, fig.cap = "Percentage of ambulance utilization",}
 #| echo: false
 #| message: false
-=======
-```{r label = "eda3", echo = FALSE, warning = FALSE, message = FALSE, fig.show = 'hold'}
->>>>>>> 9b8e6b4025cdf00cfe50d87676c0d252cefc1cd4
 
 ggplot(util_plot, aes(x = VEH.GRID, y = utilization, fill = BASE.NAME)) +
   geom_col(width = 0.7, color = "grey20") +
@@ -643,11 +624,6 @@ summary_stats <- concurrency_results |>
 
 <<<<<<< HEAD
 ```{r fig-4, fig.cap= "Example timeline of call status on January 16, 2024."}
-#| echo: false
-#| message: false
-=======
-```{r label = "eda4", echo = FALSE, warning = FALSE, message = FALSE, fig.show = 'hold'}
->>>>>>> 9b8e6b4025cdf00cfe50d87676c0d252cefc1cd4
 
 plot_daily_timeline_stacked <- function(data, target_date) {
   target_date <- as.Date(target_date, tz = TZ)
@@ -1038,7 +1014,7 @@ sec_between <- function(a, b) {
 
 simulate_dispatch <- function(dat, units_vec_named) {
   if (is.null(names(units_vec_named)) || anyNA(names(units_vec_named))) {
-    stop("`units_vec_named` must be a named numeric vector, e.g. c(Central=3, South=1).")
+    stop("units_vec_named must be a named numeric vector, e.g. c(Central=3, South=1).")
   }
   if (sum(units_vec_named) <= 0) stop("No units in scenario.")
 
@@ -1123,7 +1099,7 @@ simulate_dispatch <- function(dat, units_vec_named) {
 ```
 
 ```{r, include=FALSE}
-# Ensure required columns exist in `ems`
+
 stopifnot(all(c("Incident_ID","DT.DISP","DT.AVAILABLE") %in% names(ems)))
 
 # Scenario set (adjust counts as needed)
@@ -1135,7 +1111,6 @@ scenario_defs <- list(
   S4 = c(Central = 2, FarNorth  = 1, South = 1)
 )
 
-# Run every scenario on the full `ems` (original dataset)
 sim_by_scenario <- imap_dfr(
   scenario_defs,
   ~ simulate_dispatch(ems, .x) %>% mutate(Scenario = .y),
@@ -1152,7 +1127,6 @@ ems_simplified <- sim_by_scenario %>%
 
 ```{r, include=FALSE}
 
-# --- Helper to get the original station from `ems`
 derive_orig_station <- function(ems) {
   if ("original_assignment" %in% names(ems)) {
     ems %>%
@@ -1169,7 +1143,7 @@ derive_orig_station <- function(ems) {
         )
       )
   } else {
-    stop("Need either `original_assignment` or `BASE.NAME` in `ems` to derive original station.")
+    stop("Need either original_assignment or BASE.NAME in ems to derive original station.")
   }
 }
 
@@ -1192,8 +1166,6 @@ if ("Scenario" %in% names(ems_simplified) &&
     )
 
 } else {
-  # 2) Else compare to original station derived from `ems`
-  # Make sure ems has Incident_ID already (as you did earlier)
   ems <- ems %>% mutate(Incident_ID = as.character(Incident_ID))
   orig <- derive_orig_station(ems) %>% distinct(Incident_ID, .keep_all = TRUE)
 
