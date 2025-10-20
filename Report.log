@@ -1,4 +1,4 @@
-This is XeTeX, Version 3.141592653-2.6-0.999995 (TeX Live 2023) (preloaded format=xelatex 2024.1.1)  20 OCT 2025 01:59
+This is XeTeX, Version 3.141592653-2.6-0.999995 (TeX Live 2023) (preloaded format=xelatex 2024.1.1)  20 OCT 2025 14:26
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -935,27 +935,29 @@ File: mt-msb.cfg 2005/06/01 v1.0 microtype config. file: AMS symbols (b) (RS)
 
 ]
 
-LaTeX Warning: Reference `tab:tab-1' on page 2 undefined on input line 118.
+LaTeX Warning: Reference `tab:tab-2' on page 2 undefined on input line 124.
 
+[2]
 LaTeX Font Info:    Font shape `TU/latinmodern-math.otf(1)/m/n' will be
-(Font)              scaled to size 7.665pt on input line 128.
+(Font)              scaled to size 7.665pt on input line 134.
 LaTeX Font Info:    Font shape `TU/latinmodern-math.otf(1)/m/n' will be
-(Font)              scaled to size 5.475pt on input line 128.
+(Font)              scaled to size 5.475pt on input line 134.
 LaTeX Font Info:    Font shape `TU/latinmodern-math.otf(2)/m/n' will be
-(Font)              scaled to size 10.95099pt on input line 128.
+(Font)              scaled to size 10.95099pt on input line 134.
 LaTeX Font Info:    Font shape `TU/latinmodern-math.otf(2)/m/n' will be
-(Font)              scaled to size 7.66568pt on input line 128.
+(Font)              scaled to size 7.66568pt on input line 134.
 LaTeX Font Info:    Font shape `TU/latinmodern-math.otf(2)/m/n' will be
-(Font)              scaled to size 5.4755pt on input line 128.
+(Font)              scaled to size 5.4755pt on input line 134.
 LaTeX Font Info:    Font shape `TU/latinmodern-math.otf(3)/m/n' will be
-(Font)              scaled to size 10.94882pt on input line 128.
+(Font)              scaled to size 10.94882pt on input line 134.
 LaTeX Font Info:    Font shape `TU/latinmodern-math.otf(3)/m/n' will be
-(Font)              scaled to size 7.66417pt on input line 128.
+(Font)              scaled to size 7.66417pt on input line 134.
 LaTeX Font Info:    Font shape `TU/latinmodern-math.otf(3)/m/n' will be
-(Font)              scaled to size 5.47441pt on input line 128.
-[2] [3] [4]
+(Font)              scaled to size 5.47441pt on input line 134.
+[3] [4]
 File: Report_files/figure-latex/fig-1-1.pdf Graphic file (type pdf)
 <use Report_files/figure-latex/fig-1-1.pdf>
+[5]
 File: Report_files/figure-latex/fig-2-1.pdf Graphic file (type pdf)
 <use Report_files/figure-latex/fig-2-1.pdf>
 File: Report_files/figure-latex/fig-3-1.pdf Graphic file (type pdf)
@@ -970,27 +972,26 @@ LaTeX Warning: `!h' float specifier changed to `!ht'.
 
 LaTeX Warning: `!h' float specifier changed to `!ht'.
 
-
-LaTeX Warning: `!h' float specifier changed to `!ht'.
-
 File: Report_files/figure-latex/fig-7-1.pdf Graphic file (type pdf)
 <use Report_files/figure-latex/fig-7-1.pdf>
 File: Report_files/figure-latex/fig-8-1.pdf Graphic file (type pdf)
 <use Report_files/figure-latex/fig-8-1.pdf>
 File: Report_files/figure-latex/fig-9-1.pdf Graphic file (type pdf)
 <use Report_files/figure-latex/fig-9-1.pdf>
-[5] [6] [7] [8] [9] [10] [11] [12] [13] (./Report.aux)
+File: Report_files/figure-latex/fig-10-1.pdf Graphic file (type pdf)
+<use Report_files/figure-latex/fig-10-1.pdf>
+[6] [7] [8] [9] [10] [11] [12] [13] (./Report.aux)
 
 LaTeX Warning: There were undefined references.
 
  ) 
 Here is how much of TeX's memory you used:
- 20638 strings out of 476683
- 380525 string characters out of 5804048
+ 20646 strings out of 476683
+ 380859 string characters out of 5804048
  1860018 words of memory out of 5000000
- 40554 multiletter control sequences out of 15000+600000
+ 40561 multiletter control sequences out of 15000+600000
  518818 words of font info for 83 fonts, out of 8000000 for 9000
  1348 hyphenation exceptions out of 8191
- 86i,9n,121p,1284b,366s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 86i,9n,121p,1238b,366s stack positions out of 10000i,1000n,20000p,200000b,200000s
 
 Output written on Report.pdf (13 pages).
