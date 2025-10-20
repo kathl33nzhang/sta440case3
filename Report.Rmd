@@ -3,10 +3,10 @@ title: "Vance County EMS Station Analysis Report"
 author: "Alayna Binder, Cindy Ju, Kathleen Zhang"
 date: "2025-10-21"
 output:
-  pdf_document:
+  bookdown::pdf_document2:
     latex_engine: xelatex
     number_sections: true
-    toc: true
+    toc: false
 fontsize: 11pt
 geometry: margin=1in
 df_print: kable
@@ -16,11 +16,7 @@ df_print: kable
 
 # Background
 
-Without an effective distribution of emergency medical resources, counties risk delayed response times that can mean the difference between life and death. To improve coverage across Vance County, researchers analyzed data from the county’s EMS system, which currently operates four ambulances from two stations located in the Central and South districts. Historical records show that residents in the North district face much longer response times, often averaging over 12 minutes, compared to 6 and 9 minutes in the Central and South regions.
-
-Using a dataset of recorded EMS trips containing call locations, dispatch and arrival times, and Google API travel estimates, this analysis evaluates how different station configurations and vehicle allocations affect system performance. The county is considering establishing a new station in the North district, with two potential site options (Near North and Far North), and several ambulance distribution scenarios.
-
-Our goal is to determine which North station location would most effectively reduce response times and how the four available ambulances should be allocated among the stations to balance coverage and minimize system strain. We aim to illustrate this through visual and numerical summaries that highlight tradeoffs in travel time and resource availability across the scenarios.
+Without an effective distribution of emergency medical resources, counties risk delayed response times that can mean the difference between life and death. To improve coverage across Vance County, researchers analyzed data from the county’s EMS system, which currently operates four ambulances from two stations located in the Central and South districts. Historical records show that residents in the North district face much longer response times, often averaging over 12 minutes, compared to 6 and 9 minutes in the Central and South regions. Using a dataset of recorded EMS trips containing call locations, dispatch and arrival times, and Google API travel estimates, this analysis evaluates how different station configurations and vehicle allocations affect system performance. The county is considering establishing a new station in the North district, with two potential site options (Near North and Far North), and several ambulance distribution scenarios. Our goal is to determine which North station location would most effectively reduce response times and how the four available ambulances should be allocated among the stations to balance coverage and minimize system strain. 
 
 # Data and Exploratory Analysis
 
@@ -28,83 +24,61 @@ Our goal is to determine which North station location would most effectively red
 
 <!-- Talk about Duke Hospital outlier removed, how we handled NAs, etc., add reasoning on why we chose UA -->
 
-We were given 489 observations of calls occurring in Vance County between January 1st to January 25th in 2024.
-
-One of the calls went to Duke Hospital, which we excluded. Additionally, in certain incidents where multiple patients were involved, they would be transported in the same ambulance. As we only care about the availability of ambulances and not how many patients were in a single ambulance, we cleaned the dataset so that every identical row represented a single, unique incident involving one ambulance. The identical condition ensured datapoints where multiple ambulances were sent out for one incident with multiple patients would still be in the dataset, as it would impact ambulance load.
+We were given 489 observations of calls occurring in Vance County between January 1st to January 25th in 2024. One of the calls went to Duke Hospital, which we excluded. Additionally, in certain incidents where multiple patients were involved, they would be transported in the same ambulance. As we only care about the availability of ambulances and not how many patients were in a single ambulance, we cleaned the dataset so that every identical row represented a single, unique incident involving one ambulance. The identical condition ensured datapoints where multiple ambulances were sent out for one incident with multiple patients would still be in the dataset, as it would impact ambulance load.
 
 ## Exploratory Data Analysis
 
-To understand where and when ambulance demand occurs, our EDA began with plotting a call-density map (Figure 1) that showed a clear cluster around the Central station with spread in the South and scatter in the North, motivating scenarios that add northern coverage. We then compared Near North vs. Far North (Figure 2) calls, and found that using Google's UA travel times, Near North was closer for 90% of northern calls, cut response time by about 4 minutes on average relative to Far North, and had shorter total call duration with quicker transportation to hospitals.
+To understand where and when ambulance demand occurs, our EDA began with plotting a call-density map (Figure \@ref(fig:fig-1)) that showed a clear cluster around the Central station with spread in the South and scatter in the North, motivating scenarios that add northern coverage. We then compared Near North vs. Far North (Figure \@ref(fig:fig-2)) calls, and found that using Google's UA travel times, Near North was closer for 90% of northern calls, cut response time by about 4 minutes on average relative to Far North, and had shorter total call duration with quicker transportation to hospitals.
 
 # Modeling
 
-## Simulating the Data
+## Data Simulation
 
-The objectives are to compare different scenarios to determine the optimal options for station placement as well as ambulance allocations, but we do not have data about ambulance response times under different station locations and ambulance allocations. As a result, we conducted a simulation that would simulate response times for each of the five scenarios for every single call in our cleaned dataset, resulting in 5 observations for every original call.
+We did not have data about ambulance response times under different station locations and ambulance allocations for comparison, so we simulated response times for each of the five scenarios for every call. The different scenarios under consideration are in Table \@ref(tab:tab-1). Dispatch rules governed how the simulation responded to different scenarios. 
 
-We developed Scenario Dispatch Rules that would govern how the simulation responded to different scenarios.
-
-From our exploratory data analysis, we determined that we wanted to consider scenarios where an ambulance might not be available. Therefore, in our rules, each incoming call first checks whether any ambulances are currently available. If at least one unit is free, the system assigns the closest available unit — the one with the smallest estimated travel time, based on Google’s best-guess ETA between that station and the call location, resulting in 0 wait time. If all units are busy, the call enters a queue and waits until the next ambulance becomes free. That waiting time is then added to the total response time. Once assigned, each unit stays occupied for the observed duration of the call, and then becomes available again for the next incident.
-
-The wait time is determined by whether or not an ambulance unit is available at the moment an incident call comes in. This models the effect of queueing for service. The wait time is calculated based on two conditions:
-
-If one or more units are already free when the call arrives, we assign the closest available unit, which is the one with minimum ETA. The unit is dispatched immediately at the call time, resulting in zero wait time.
-
-Otherwise, if all units are busy when the call arrives, we assign the unit that is scheduled to become free soonest. The wait time is the time difference between the call time and the departure time, which is the time the assigned unit finally becomes free. This represents the queueing delay. In both cases, the unit's subsequent availability is updated by adding the observed service duration to its departure time, making the unit busy for the duration of the incident.
-
-Finally, we calculate Total Response Time or simulated time as Wait Time + Travel Time.
-
-We filtered the results to exclude extremely long simulated times (above 2000 seconds) to focus on more likely outcomes. We also added a variable, “switched”, which determines if the ambulance assigned in a new scenario (S1−S4) is different from the baseline assignment (S0).
+From our EDA, we determined that we wanted to consider load scenarios. Therefore, each incoming call first checks whether any ambulances are currently available. If at least one unit is free, the system assigns the unit with the smallest estimated travel time (Google best-guess ETA), resulting in 0 wait time. Once assigned, each unit stays occupied for the observed duration of the call, and then becomes available again. If all units are busy when the call arrives, we assign the unit that is scheduled to become free soonest. The wait time there is the time difference between the call time and the departure time, which is the time the assigned unit finally becomes free. In both cases, the unit's subsequent availability is updated by adding the observed service duration to its departure time, making the unit busy for the duration of the incident. Finally, we calculate Total Response Time or simulated time as Wait Time + Travel Time. We filtered the results to exclude extremely long simulated times (above 2000 seconds) to focus on more likely outcomes and added a variable, “switched”, which determines if the ambulance assigned in a new scenario is different from the baseline assignment. Simulation results are in Table \@ref(tab:tab-2).
 
 ## Model Selection and Rationale
 
-We chose to use a linear mixed model with a fixed effect on Scenario, which allowed us to calculate and test the difference in the mean simulated response time between our five Scenarios (S0 through S4), as one of the primary objectives was determining changes in response time across different scenarios.
+We chose to use a linear mixed model with a fixed effect on Scenario, which allowed us to calculate and test the difference in the mean simulated response time between our five Scenarios (S0 through S4), as one of the primary objectives was determining changes in response time across different scenarios. We also included a random intercept for Incident_ID, allowing every unique incident to have its own baseline average response time that differs from the overall mean, even before accounting for the Scenario.
 
-We also included a random intercept for Incident_ID, allowing every unique incident to have its own baseline average response time that differs from the overall mean, even before accounting for the Scenario.
-
-We fit a preliminary model with just these two components, but it had a lot of heteroscedasticity in the residuals plot. Therefore, we added a variance function that allows the remaining unexplained variability in response time to be different for each Scenario. If a scenario has a high residual variance, it means that even after controlling for the mean, its response times are highly unpredictable or erratic. Meanwhile, if a scenario has a low residual variance, it indicates highly consistent service performance, which is generally desirable in a real-world context.
-
-Thus, our final model was:
-
-$$\text{sim\_time}_{ij} = \beta_0 + \sum_{k=1}^4 \beta_k \cdot I(\text{Scenario}_j = S_k) + u_i + \epsilon_{ij} $$
+We fit a preliminary model with just these two components, but it had a lot of heteroscedasticity in the residuals plot. Therefore, we added a variance function that allows the remaining unexplained variability in response time to be different for each Scenario. If a scenario has a high residual variance, it means that even after controlling for the mean, its response times are highly unpredictable or erratic. Meanwhile, if a scenario has a low residual variance, it indicates highly consistent service performance, which is generally desirable in a real-world context. Thus, our final model was:
 
 $$
-u_i \sim N(0, \sigma^2_u)\text{, }\epsilon_{ij} \sim N(0, \sigma^2)
+\begin{aligned}
+\text{sim\_time}_{ij} &= \beta_0 + \sum_{k=1}^{4} \beta_k\,\mathbb{I}(\text{Scenario}_j = S_k) + u_i + \epsilon_{ij} \\
+u_i &\sim \mathcal{N}(0,\sigma_u^2), \quad \epsilon_{ij} \sim \mathcal{N}(0,\sigma_j^2) \\
+\text{where}\;\sigma_j^2 &= \sigma^2 \cdot \delta_j^2
+\end{aligned}
 $$
 
-where $\sigma^2_j = \sigma^2 \cdot\delta^2_j$
-
-$\text{sim_time}_{ij}$ is the simulated response time for the $i$-th Incident ID under the $j$-th Scenario.
-
-$u_i$ is the random intercept for the $i$-th Incident ID. $\sigma^2_j$ is the residual variance specific to the $j$-th Scenario, which is impacted by our variance parameter $\delta_j^2$ that scales the baseline variance for Scenario $j$.
+$\text{sim\_time}_{ij}$ is the simulated response time (seconds) for the $i$-th Incident ID under the $j$-th Scenario. $u_i$ is the random intercept for the $i$-th Incident ID, accounting for the unique, unobserved baseline difficulty of that specific call. $\sigma^2_u$ is the variance of the random intercepts. $\sigma^2_j$ is the residual variance specific to the $j$-th Scenario, which is modeled using our variance parameter $\delta^2_j$ that scales the baseline residual variance ($\sigma^2$) for Scenario $j$.
 
 ## Model Implementation
 
-Linear mixed models were fit in R using the `nlme` package. Additionally, we ended up dropping data where simulated time was the same across all scenarios in order to focus on the effect of changes resulting from the different Scenarios.
+Linear mixed models were fit in R using the `nlme` package. We used the Restricted Maximum Likelihood (REML) method for estimation, which is standard practice for linear mixed models when comparing different variance structures. Additionally, the model was fit on a reduced dataset where incidents showing no variability in simulated response time across all five scenarios were dropped to ensure our coefficients primarily capture the effects of the scenario changes, not just baseline noise.
 
 ## Model Evaluation
 
-Dropping the data where simulated time was the same across all scenarios resulted in a lower AIC and BIC of the model fitted on the reduced dataset compared to the non-reduced dataset.
+First, while modelling, dropping the data where simulated time was the same across all scenarios resulted in a lower AIC and BIC of the model fitted on the reduced dataset compared to the non-reduced dataset. Next, after getting to our final model, we examined the residual plots to check model assumptions. A Q-Q plot can be found in Figure \@ref(fig:fig-7) and normalized Residuals vs Fitted Values plot can be found in Figure \@ref(fig:fig-8).
 
-We also examined a QQ plot which appears approximately normal. Our Normalized Residuals vs Fitted Values plot of the total response time appears randomly distributed.
+Due to anticipated heteroscedasticity, we fitted our model with a variance structure. We needed a normalized residuals plot to account for weighting due to our variance function, which applied weights to the residuals based on the Scenario to ensure the model fit is accurate despite the unequal variance. There did not appear to be any major patterns in the residuals, which are spread without a lot of heteroscedasticity. Additionally, there did not appear to be significant deviation from the Q-Q plot, indicating the assumption of normality is satisfied. We also looked at the Residuals vs Fitted Values plot by Scenario, where the points in red indicate calls where the assigned station under the simulation was different from the assigned station in our original dataset.
 
-We also looked at the Residuals vs Fitted by Scenario, where the points in red indicate calls where the assigned station under the simulation was different from the assigned station in our original dataset.
+Simulated scenarios generally showed more vertical spread than S0, meaning after controlling for mean response time and an incident's baseline difficulty, the unpredictability of the response time is typically higher in alternate scenarios. Additionally, the red points tend to be more extreme residuals, suggesting that when the scenario change causes a station switch, the simulated response time becomes more unpredictable relative to the mean. Scenario 3, which had the fastest mean response time, had less switches than S1 and S2 and a tighter spread, indicating better consistency.
 
-# Model Results
+## Model Results
 
-The intercept term is the estimated mean simulated total response time for the reference group, Scenario 0, which is the current distribution of ambulances and stations. The mean response time in S0 is approximately 470.22 seconds or 7 minutes, 50 seconds. This value is highly significant, with a p-value \< 0.001 .
+The first research question was to determine which of the proposed North district station locations would better serve the community. The second research question was how the four available ambulances should be allocated to best serve the community. We prioritized determining which of our 5 scenarios, which goes over all the possible placements, resulted in the shortest mean response time, as we felt that decreasing the average response time would be the best overall benefit to the community in terms of improving patient outcomes. Secondary considerations were the percent of simulated calls under 8 and 10 minutes, as more extreme wait times would lead to worse outcomes for patients, and another way to evaluate the best scenario was determining which one minimized "worse outcome" call times.
 
-The mean simulated total response time in Scenario 3 is estimated to be 60.96 seconds faster than in Scenario 0, with this being a significant difference.
+Based on our model results in Table \@ref(tab:tab-3), the mean simulated total response time in Scenario 3 is estimated to be 60.96 seconds faster than our baseline, Scenario 0, with this being a significant difference with a p-value of 0.0062, well under our threshold of 0.05. The intercept term is the estimated mean simulated total response time for the reference group, Scenario 0, which is the current distribution of ambulances and stations. The mean response time in S0 is approximately 470.22 seconds or 7 minutes, 50 seconds. This indicates that the mean response time of Scenario 3 is estimated to be around 6 minutes, 48 seconds. All other scenarios had positive coefficients, indicating they resulted in longer mean response times than the baseline. Therefore, we concluded that the Scenario 3 station placement and ambulance allocation was ideal.
 
 # Conclusion, Shortcomings and Future Work
 
-## Conclusion
-
-After evaluating five ambulance deployment layouts across the county by replaying the same 489 incidents under each scenario with a dispatch rule (sending the closest available unit, if none are free, dispact the next free unit when it is available), our analysis showed that Scenario 3, which locates one ambulance in the Near North, two ambulances in the Central, and one ambulance in the South, perfomed best. Across mean and median response times, Scenario 3 reduced average response time the most and produced the highest share of calls meeting eight and ten minute targets. These results are consistent with intuition, where a more balanced coverage of the county opposed to a centralized fleet lowers typical responses and extreme delays.
-
-## Limitations and Future Work
+After evaluating five ambulance deployment layouts across the county by replaying the same 489 incidents under each scenario with a dispatch rule (sending the closest available unit, if none are free, dispact the next free unit when it is available), our analysis showed that Scenario 3, which locates one ambulance in the Near North, two ambulances in the Central, and one ambulance in the South, performed best. Across mean and median response times, Scenario 3 reduced average response time the most and produced the highest share of calls meeting eight and ten minute targets. These results are consistent with intuition, where a more balanced coverage of the county opposed to a centralized fleet lowers typical responses and extreme delays.
 
 However, one limitation to our analysis is the travel-time realism- we used Google's unadjusted ETAs and treated them as fixed, so rush hour, weather, and road disruptions are not modeled, which underestimates our variability. Additionally, there was no priority handling and all calls were treated the same, so our model is limited in analyzing how our layouts affect critical cases vs. low-priority calls. In the future, additional work would involve adding time-of-day factors to travel by multiplying ETAs by peak/off-peak multipliers, and running two queues for emergency and non-emergency, allowing emergencies to jump ahead of any waiting non-emergency calls when waiting for the next dispatch.
+
+\newpage
 
 # Appendix
 
@@ -157,9 +131,9 @@ ems <- x |>
   )
 ```
 
-**Figure One: Density of Calls in Vance County**
-
-```{r label = "eda1", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "EMS call density across Vance County (geographically)", fig.show = 'hold'}
+```{r fig-1, echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "EMS call density across Vance County (geographically)", fig.show = 'hold'}
+#| echo: false
+#| message: false
 
 ems_plot <- data.frame(
   lon = as.numeric(x$REF.GPS.LON),
@@ -202,9 +176,7 @@ ggplot(ems_plot, aes(lon, lat)) +
   )
 ```
 
-\newpage
-
-```{r label = "eda2_1", echo = FALSE, warning = FALSE, message = FALSE, fig.show = 'hold'}
+```{r, include = FALSE}
 
 ems <- ems |>
   mutate(
@@ -226,9 +198,9 @@ north_choice <- ems |>
 
 ```
 
-**Figure Two: Comparison of Near vs. Far North Demand**
-
-```{r label = "eda2_2", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "test", fig.show = 'hold'}
+```{r fig-2, echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "Comparison of Near vs. Far North demand", fig.show = 'hold'}
+#| echo: false
+#| message: false
 
 ems %>%
   filter(REF.GRID == "North") %>%
@@ -257,8 +229,6 @@ ems %>%
     plot.subtitle = element_text(size = 11, color = "grey40")
   )
 ```
-
-**Figure Three: Percentage of Ambulance Utilization**
 
 ```{r, include=FALSE}
 
@@ -414,7 +384,9 @@ ggplot(by_medic_base, aes(x = reorder(VEH.GRID, -n_calls), y = pct, fill = BASE.
   theme(panel.grid.major.y = element_blank(), legend.position = "top")
 ```
 
-```{r label = "eda3", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "", fig.show = 'hold'}
+```{r, fig-3, fig.cap = "Percentage of ambulance utilization",}
+#| echo: false
+#| message: false
 
 ggplot(util_plot, aes(x = VEH.GRID, y = utilization, fill = BASE.NAME)) +
   geom_col(width = 0.7, color = "grey20") +
@@ -440,8 +412,6 @@ ggplot(util_plot, aes(x = VEH.GRID, y = utilization, fill = BASE.NAME)) +
     plot.margin = margin(10, 30, 10, 10) # room for labels on the right
   )
 ```
-
-**Figure Four: Examining Overburdening Issue**
 
 ```{r, include=FALSE}
 
@@ -563,7 +533,9 @@ print(summary_stats)
 
 ```
 
-```{r label = "eda4", echo = FALSE, warning = FALSE, message = FALSE, fig.cap = "", fig.show = 'hold'}
+```{r fig-4, fig.cap= "Example timeline of call status on January 16, 2024."}
+#| echo: false
+#| message: false
 
 plot_daily_timeline_stacked <- function(data, target_date) {
   target_date <- as.Date(target_date, tz = TZ)
@@ -691,8 +663,6 @@ plot_daily_timeline_stacked(ems_clean, "2024-01-16")
 
 ```
 
-**Figure Five: Overburdening by Region**
-
 ```{r, include=FALSE}
 
 concurrency_results |>
@@ -708,7 +678,9 @@ mean(concurrency_central$overburdened)
 
 ```
 
-```{r label = "eda5", echo = FALSE, warning = FALSE, message = FALSE, fig.show = 'hold'}
+```{r, fig-5, fig.cap="Shows the maximum concurrent number of calls within a given hour across the dataset. Most of the time there were no or very few concurrent calls, but Central was more prone to having concurrent calls."}
+#| echo: false
+#| message: false
 
 concurrency_central <- concurrency_results |>
   filter(region == "2 Central") |>
@@ -729,3 +701,613 @@ ggplot(counts, aes(x = factor(max_concurrency), y = n, fill = region)) +
   ) +
   theme_minimal()
 ```
+
+
+
+
+```{r message=F, include=FALSE}
+rm(list = ls())
+library(tidyverse)
+library(nlme)
+library(sf)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(tibble)
+set.seed(440)
+
+load("emsData.RData")
+```
+
+
+
+```{r, include=FALSE}
+ems <- x %>%
+  mutate(Incident_ID = as.character(rownames(.)))
+```
+
+```{r, include=FALSE}
+ems <- ems |>
+  dplyr::arrange(DT.DISP, DT.AVAILABLE, BASE.NAME, Incident_ID) |>
+  dplyr::distinct(Incident_ID, .keep_all = TRUE)
+```
+
+```{r, include=FALSE}
+ems <- ems |>
+  group_by(DT.DISP, BASE.NAME) |>
+  mutate(
+    Incident_ID = cur_group_id(),
+    Patient_Count = n()
+  ) |>
+  slice(1) |>
+  ungroup()
+```
+
+
+
+
+
+```{r, include=FALSE}
+ems_simplified <- ems |>
+  mutate(
+    actual_travel_time = as.numeric(DT.ARRIVE - DT.DISP)
+  ) |>
+  select(Incident_ID, REF.GRID, DISPATCH.PRIORITY.NAME, REF.GPS.LAT, REF.GPS.LON, VEHCGPS, actual_travel_time) |>
+  separate(VEHCGPS, into = c("VEH.GPS.LAT", "VEH.GPS.LON"), sep = ",", convert = TRUE) %>%
+  mutate(
+    VEH.GPS.LAT = as.numeric(trimws(VEH.GPS.LAT)),
+    VEH.GPS.LON = as.numeric(trimws(VEH.GPS.LON)),
+    # simple Euclidean distance in degrees
+    distance = sqrt((REF.GPS.LAT - VEH.GPS.LAT)^2 + (REF.GPS.LON - VEH.GPS.LON)^2)
+  ) |>
+  filter(REF.GPS.LON > -78.7)
+```
+
+```{r, include=FALSE}
+ems_pts = st_as_sf(ems_simplified, coords = c("REF.GPS.LON","REF.GPS.LAT"), crs = 4326)
+
+# PARAMETERS
+max_calls     <- 50      # split if a cell has > max_calls
+cellsize_init <- 0.1    # starting cell size in degrees (your 0.1)
+min_cellsize  <- 0.04   # don't split smaller than this (deg)
+max_depth     <- 4      # safety guard against runaway splitting
+
+xy <- st_coordinates(ems_pts)
+x  <- xy[,1]
+y  <- xy[,2]
+
+bb   <- st_bbox(ems_pts)
+xspan <- as.numeric(bb["xmax"] - bb["xmin"])
+yspan <- as.numeric(bb["ymax"] - bb["ymin"])
+
+nx <- max(1L, ceiling(xspan / cellsize_init))
+ny <- max(1L, ceiling(yspan / cellsize_init))
+
+x0 <- as.numeric(bb["xmin"])
+y0 <- as.numeric(bb["ymin"])
+x1 <- x0 + nx * cellsize_init
+y1 <- y0 + ny * cellsize_init
+
+cells <- list()
+k <- 0L
+for (i in 0:(nx-1L)) {
+  for (j in 0:(ny-1L)) {
+    k <- k + 1L
+    xmin <- x0 + i * cellsize_init
+    xmax <- xmin + cellsize_init
+    ymin <- y0 + j * cellsize_init
+    ymax <- ymin + cellsize_init
+    idx  <- which(x >= xmin & x < xmax & y >= ymin & y < ymax)
+    cells[[k]] <- list(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax,
+                       idx=idx, depth=0L)
+  }
+}
+
+leaves <- list()
+queue  <- cells
+cells  <- NULL
+
+while (length(queue) > 0L) {
+  node <- queue[[length(queue)]]; queue[[length(queue)]] <- NULL
+  npts <- length(node$idx)
+  width  <- node$xmax - node$xmin
+  height <- node$ymax - node$ymin
+  too_many   <- npts > max_calls
+  can_split  <- (max(width, height) > min_cellsize) && (node$depth < max_depth)
+
+  if (too_many && can_split) {
+    mx <- (node$xmin + node$xmax) / 2
+    my <- (node$ymin + node$ymax) / 2
+    idx <- node$idx
+
+    Q1 <- idx[ x[idx] >= node$xmin & x[idx] < mx   & y[idx] >= node$ymin & y[idx] <  my ]  # SW
+    Q2 <- idx[ x[idx] >= mx        & x[idx] < node$xmax & y[idx] >= node$ymin & y[idx] <  my ]  # SE
+    Q3 <- idx[ x[idx] >= node$xmin & x[idx] < mx   & y[idx] >= my         & y[idx] <= node$ymax ]# NW
+    Q4 <- idx[ x[idx] >= mx        & x[idx] <= node$xmax & y[idx] >= my   & y[idx] <= node$ymax ]# NE
+
+    depth2 <- node$depth + 1L
+    queue[[length(queue)+1L]] <- list(xmin=node$xmin, xmax=mx, ymin=node$ymin, ymax=my, idx=Q1, depth=depth2)
+    queue[[length(queue)+1L]] <- list(xmin=mx, xmax=node$xmax, ymin=node$ymin, ymax=my, idx=Q2, depth=depth2)
+    queue[[length(queue)+1L]] <- list(xmin=node$xmin, xmax=mx, ymin=my, ymax=node$ymax, idx=Q3, depth=depth2)
+    queue[[length(queue)+1L]] <- list(xmin=mx, xmax=node$xmax, ymin=my, ymax=node$ymax, idx=Q4, depth=depth2)
+  } else {
+    leaves[[length(leaves)+1L]] <- node
+  }
+}
+
+rect_to_poly <- function(xmin,xmax,ymin,ymax){
+  st_polygon(list(matrix(
+    c(xmin,ymin,  xmin,ymax,  xmax,ymax,  xmax,ymin,  xmin,ymin),
+    byrow=TRUE, ncol=2)))
+}
+
+polys <- lapply(leaves, function(nd) rect_to_poly(nd$xmin, nd$xmax, nd$ymin, nd$ymax))
+sectors <- st_sf(
+  sector_id = paste0("Q", seq_along(leaves)),
+  n_calls   = vapply(leaves, function(nd) length(nd$idx), integer(1)),
+  depth     = vapply(leaves, function(nd) nd$depth, integer(1)),
+  geometry  = st_sfc(polys, crs = 4326)
+)
+```
+
+
+```{r, include=FALSE}
+
+ems_pts_with_sector <- st_join(ems_pts, sectors["sector_id"], join = st_within)
+
+missing <- is.na(ems_pts_with_sector$sector_id)
+if (any(missing)) {
+  nearest_idx <- st_nearest_feature(ems_pts_with_sector[missing, ], sectors)
+  ems_pts_with_sector$sector_id[missing] <- sectors$sector_id[nearest_idx]
+}
+
+ems_simplified$sector_id <- ems_pts_with_sector$sector_id
+
+table(is.na(ems_simplified$sector_id))
+head(ems_simplified$sector_id)
+```
+```{r, include=FALSE}
+sector_counts <- ems_simplified %>%
+  count(sector_id, name = "n_calls")
+
+label_pts <- st_point_on_surface(sectors) %>%
+  mutate(label = paste0(sector_id, "\n(n=", n_calls, ")"))
+
+north_sectors <- c("Q22", "Q12", "Q5", "Q1", "Q23", "Q13", "Q6", "Q2")
+south_sectors <- c("Q25", "Q21", "Q11", "Q4")
+```
+
+```{r, include=FALSE}
+ems_simplified <- ems_simplified %>%
+  filter(
+    !is.na(actual_travel_time),
+    !is.na(distance),
+    !is.na(DISPATCH.PRIORITY.NAME),
+    !is.na(sector_id),
+    !is.na(REF.GRID),
+    is.finite(actual_travel_time),
+    is.finite(distance)
+  ) %>%
+  mutate(
+    DISPATCH.PRIORITY.NAME = droplevels(factor(DISPATCH.PRIORITY.NAME)),
+    sector_id              = droplevels(factor(sector_id)),
+    REF.GRID               = droplevels(factor(REF.GRID))
+  ) |>
+  mutate(
+    region = if_else(sector_id %in% north_sectors, "NORTH", if_else(sector_id %in% south_sectors, "SOUTH", "CENTRAL"))
+  )
+
+ems_pts = st_as_sf(ems_simplified, coords = c("REF.GPS.LON","REF.GPS.LAT"), crs = 4326)
+```
+
+
+
+
+```{r, include=FALSE}
+eta_col_for <- function(station) {
+  switch(station,
+    "Central"   = "eTT.BG.Ce",
+    "South"     = "eTT.BG.So",
+    "NearNorth" = "eTT.BG.NN",
+    "FarNorth"  = "eTT.BG.FN",
+    stop(sprintf("Unknown station: %s", station))
+  )
+}
+sec_between <- function(a, b) {
+  as.numeric(difftime(a, b, units = "secs"))
+}
+
+simulate_dispatch <- function(dat, units_vec_named) {
+  if (is.null(names(units_vec_named)) || anyNA(names(units_vec_named))) {
+    stop("`units_vec_named` must be a named numeric vector, e.g. c(Central=3, South=1).")
+  }
+  if (sum(units_vec_named) <= 0) stop("No units in scenario.")
+
+  dat <- dat[order(dat$DT.DISP, dat$DT.AVAILABLE, dat$Incident_ID), ]
+  rownames(dat) <- NULL
+
+  stations <- rep(names(units_vec_named), times = as.integer(units_vec_named))
+  unit_idx <- ave(seq_along(stations), stations, FUN = seq_along)
+  fleet <- data.frame(
+    station   = stations,
+    unit_id   = paste0(stations, "_", unit_idx),
+    next_free = min(dat$DT.DISP, na.rm = TRUE) - 1,   # all free just before first call
+    stringsAsFactors = FALSE
+  )
+
+  # Output containers
+  n <- nrow(dat)
+  out_station <- character(n)
+  out_unit    <- character(n)
+  out_wait    <- numeric(n)
+  out_travel  <- numeric(n)
+
+  # Sim loop
+  for (i in seq_len(n)) {
+    t_call <- dat$DT.DISP[i]
+    if (is.na(t_call)) next
+
+    # service duration as observed (dispatch -> available)
+    svc <- sec_between(dat$DT.AVAILABLE[i], dat$DT.DISP[i])
+    if (!is.finite(svc) || svc < 0) svc <- 0
+
+    # per-unit ETA to this call
+    eta_cols <- vapply(fleet$station, eta_col_for, character(1))
+    eta_vals <- vapply(eta_cols, function(col) {
+      if (!col %in% names(dat)) return(Inf)
+      v <- dat[[col]][i]
+      if (is.na(v)) Inf else as.numeric(v)   # assume ETAs already in seconds
+    }, numeric(1))
+
+    available_now <- fleet$next_free <= t_call
+    available_now[is.na(available_now)] <- FALSE
+
+    if (any(available_now)) {
+      # choose among free units by minimal ETA (if all Inf, take the first free)
+      idx_free <- which(available_now)
+      best_idx <- if (any(is.finite(eta_vals[idx_free]))) {
+        idx_free[ which.min(eta_vals[idx_free]) ]
+      } else {
+        idx_free[1]
+      }
+      wait_s   <- 0
+      travel_s <- if (is.finite(eta_vals[best_idx])) eta_vals[best_idx] else 0
+      depart   <- t_call
+    } else {
+      # nobody free: take earliest to free; waiting starts until that moment
+      soonest  <- which.min(fleet$next_free)
+      depart   <- fleet$next_free[soonest]
+      wait_s   <- sec_between(depart, t_call)
+      travel_s <- if (is.finite(eta_vals[soonest])) eta_vals[soonest] else 0
+      best_idx <- soonest
+    }
+
+    # update busy time (use observed svc; do NOT add travel again to svc)
+    fleet$next_free[best_idx] <- depart + wait_s + svc
+
+    # record
+    out_station[i] <- fleet$station[best_idx]
+    out_unit[i]    <- fleet$unit_id[best_idx]
+    out_wait[i]    <- wait_s
+    out_travel[i]  <- travel_s
+  }
+
+  tibble::tibble(
+    Incident_ID   = dat$Incident_ID,
+    assigned_unit = out_unit,
+    assigned_from = out_station,
+    wait_secs     = out_wait,
+    travel_secs   = out_travel,
+    sim_time      = out_wait + out_travel   # dispatch→arrival + queue delay
+  )
+}
+```
+
+```{r, include=FALSE}
+# Ensure required columns exist in `ems`
+stopifnot(all(c("Incident_ID","DT.DISP","DT.AVAILABLE") %in% names(ems)))
+
+# Scenario set (adjust counts as needed)
+scenario_defs <- list(
+  S0 = c(Central = 3, South     = 1),
+  S1 = c(Central = 3, NearNorth = 1),
+  S2 = c(Central = 3, FarNorth  = 1),
+  S3 = c(Central = 2, NearNorth = 1, South = 1),
+  S4 = c(Central = 2, FarNorth  = 1, South = 1)
+)
+
+# Run every scenario on the full `ems` (original dataset)
+sim_by_scenario <- imap_dfr(
+  scenario_defs,
+  ~ simulate_dispatch(ems, .x) %>% mutate(Scenario = .y),
+  .id = NULL
+)
+
+sim_by_scenario <- sim_by_scenario %>%
+  filter(is.finite(sim_time), sim_time >= 0, sim_time < 2000)
+
+ems_simplified <- sim_by_scenario %>%
+  left_join(ems_simplified, by = "Incident_ID") %>%
+  relocate(Incident_ID, Scenario, sim_time, .before = dplyr::everything())
+```
+
+```{r, include=FALSE}
+
+# --- Helper to get the original station from `ems`
+derive_orig_station <- function(ems) {
+  if ("original_assignment" %in% names(ems)) {
+    ems %>%
+      transmute(Incident_ID, orig_station = as.character(original_assignment))
+  } else if ("BASE.NAME" %in% names(ems)) {
+    # Adjust this mapping to your system:
+    # Example: Company 9 = Central, everything else = South
+    ems %>%
+      transmute(
+        Incident_ID,
+        orig_station = case_when(
+          BASE.NAME == "Company 9" ~ "Central",
+          TRUE ~ "South"
+        )
+      )
+  } else {
+    stop("Need either `original_assignment` or `BASE.NAME` in `ems` to derive original station.")
+  }
+}
+
+# Ensure character Incident_ID in both frames
+ems_simplified <- ems_simplified %>% mutate(Incident_ID = as.character(Incident_ID))
+
+# 1) If an S0 baseline scenario exists, compare to that
+if ("Scenario" %in% names(ems_simplified) &&
+    any(ems_simplified$Scenario == "S0", na.rm = TRUE)) {
+
+  baseline <- ems_simplified %>%
+    filter(Scenario == "S0") %>%
+    select(Incident_ID, base_assigned_from = assigned_from)
+
+  ems_simplified <- ems_simplified %>%
+    left_join(baseline, by = "Incident_ID") %>%
+    mutate(
+      switched = !is.na(assigned_from) & !is.na(base_assigned_from) &
+                 assigned_from != base_assigned_from
+    )
+
+} else {
+  # 2) Else compare to original station derived from `ems`
+  # Make sure ems has Incident_ID already (as you did earlier)
+  ems <- ems %>% mutate(Incident_ID = as.character(Incident_ID))
+  orig <- derive_orig_station(ems) %>% distinct(Incident_ID, .keep_all = TRUE)
+
+  ems_simplified <- ems_simplified %>%
+    left_join(orig, by = "Incident_ID") %>%
+    mutate(
+      switched = !is.na(assigned_from) & !is.na(orig_station) &
+                 assigned_from != orig_station
+    )
+}
+```
+
+```{r, include=FALSE}
+# some ambulances dont go to patient scene and are missing data, we won't
+# consider them in our model
+ems_model <- ems_simplified %>%
+  mutate(
+    Scenario = as.factor(Scenario),
+    region   = as.factor(region),
+    DISPATCH.PRIORITY.NAME = as.factor(DISPATCH.PRIORITY.NAME)
+  ) %>%
+  filter(
+    is.finite(sim_time),
+    !is.na(Scenario),
+    !is.na(DISPATCH.PRIORITY.NAME),
+    !is.na(region),
+    !is.na(Incident_ID)
+  ) %>%
+  droplevels()
+
+ems_model <- ems_model %>%
+  mutate(DISPATCH.PRIORITY.NAME = relevel(factor(DISPATCH.PRIORITY.NAME),
+                                          ref = "Non Emergency"))
+```
+
+```{r, tab-2}
+#| echo: false
+#| message: false
+
+summ_tbl <- ems_model %>%
+  group_by(Scenario) %>%
+  summarise(
+    n               = n(),
+    mean_resp_s     = mean(sim_time),
+    median_resp_s   = median(sim_time),
+    # p90_resp_s      = quantile(sim_time, 0.90),
+    # p95_resp_s      = quantile(sim_time, 0.95),
+    pct_under_8min  = mean(sim_time <= 8*60),
+    pct_under_10min = mean(sim_time <= 10*60),
+    .groups = "drop"
+  ) %>%
+  arrange(mean_resp_s)
+
+knitr::kable(
+  summ_tbl,
+  format = "latex",
+  booktabs = TRUE,
+  align = "lcccc",
+  caption = "Table of summary statistics for simulation response time results by scenario."
+) |>
+  kableExtra::kable_styling(
+    full_width = FALSE,
+    position = "center",
+    latex_options = c("hold_position","striped")
+  )
+```
+
+```{r, include=FALSE}
+scenario_means_long <- ems_model %>%
+  # Group the data by the 'Scenario' variable
+  group_by(Scenario) %>%
+  # Calculate the mean of the simulated response time ('sim_time') within each group
+  summarise(
+    Mean_Response_Time = mean(sim_time, na.rm = TRUE),
+    .groups = 'drop' # Ungroup after summarising
+  )
+```
+
+
+
+
+```{r, include=FALSE}
+ems_model <- ems_model %>%
+  filter(sim_time < 2000)
+```
+
+```{r, include=FALSE}
+dropped_ems_model <- ems_model |>
+  group_by(Incident_ID) |>
+  # Keep the group if the number of distinct simulated times is greater than 1
+  filter(n_distinct(sim_time) > 1) |>
+  ungroup()
+```
+
+
+
+
+```{r, include=FALSE}
+m4 <- lme(
+  fixed  = sim_time ~ Scenario,
+  random = ~ 1 | Incident_ID,
+  weights = varIdent(form = ~ 1 | Scenario),
+  data   = dropped_ems_model,
+  method = "REML"
+)
+
+summary(m4)
+```
+
+```{r, tab-3}
+#| echo: false
+#| message: false
+
+# Fixed-effects coefficient table (from nlme::lme summary)
+tt <- summary(m4)$tTable
+coef_tbl <- tt %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Term")
+
+knitr::kable(
+  coef_tbl,
+  format = "latex",
+  booktabs = TRUE,
+  align = "lcccc",
+  caption = "Table of fixed effects coefficients from the final model."
+) |>
+  kableExtra::kable_styling(
+    full_width = FALSE,
+    position = "center",
+    latex_options = c("hold_position","striped")
+  )
+```
+
+```{r, tab-4}
+#| echo: false
+#| message: false
+
+# Variance function (varIdent): residual SD multipliers by Scenario
+var_coefs <- coef(m4$modelStruct$varStruct, unconstrained = FALSE)  # named multipliers (non-baseline levels)
+levs <- levels(dropped_ems_model$Scenario)                           # model’s Scenario levels
+sd_mult <- setNames(rep(1, length(levs)), levs)                      # baseline level has multiplier = 1
+sd_mult[names(var_coefs)] <- var_coefs
+
+var_df <- data.frame(
+  Scenario = names(sd_mult),
+  `SD multiplier` = as.numeric(sd_mult),
+  `Var multiplier` = as.numeric(sd_mult)^2,
+  check.names = FALSE
+)
+
+knitr::kable(
+  var_df,
+  format = "latex",
+  booktabs = TRUE,
+  align = "lcc",
+  caption = "Table of variance function residual standard deviation multipliers by scenario."
+) |>
+  kableExtra::kable_styling(
+    full_width = FALSE,
+    position = "center",
+    latex_options = c("hold_position","striped")
+  )
+```
+
+
+
+```{r, fig-7, fig.cap="Q-Q plot of residuals. There is only a slight deviation in the Q-Q plot."}
+#| echo: false
+#| message: false
+
+model_used <- getData(m4)
+
+diag_df <- tibble(
+  fitted    = fitted(m4),
+  resid_raw = residuals(m4, type = "response"),    # in seconds
+  resid_norm= residuals(m4, type = "normalized"),  # standardized (use these)
+  Scenario  = model_used$Scenario,
+  region    = model_used$region,
+  sector_id = model_used$sector_id,
+  observed  = model_used$sim_time,
+)
+
+# 2) QQ plot of residuals
+qqnorm(diag_df$resid_norm); qqline(diag_df$resid_norm, col = "red", lwd = 2)
+```
+
+```{r, fig-8, fig.cap="Residuals vs Fitted Values plot. There does not appear to be heteroscedasticity or a fan pattern."}
+#| echo: false
+#| message: false
+dat_used <- nlme::getData(m4)
+
+tol <- 1e-9  # tolerance for "zero"
+
+model_data <- data.frame(
+  Fitted      = as.numeric(fitted(m4, level = 1)),               # group-level fit
+  Residuals   = as.numeric(resid(m4, type = "normalized")),      # better w/ varIdent
+  Incident_ID = dat_used$Incident_ID                             # aligned IDs
+) %>%
+  filter(!is.na(Residuals), abs(Residuals) > tol)
+
+residual_plot <- ggplot(model_data, aes(x = Fitted, y = Residuals)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5) +
+  labs(
+    title = "Residuals vs. Fitted Values",
+    x = "Fitted Values",
+    y = "Normalized Residuals"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(residual_plot)
+```
+
+```{r, fig-9, fig.cap="Residuals vs Fitted Values plot by scenario. There is variations in spread across the different scenarios."}
+#| echo: false
+#| message: false
+
+
+plot_df <- dat_used |>
+  dplyr::mutate(
+    fit0   = as.numeric(fitted(m4, level = 0)),   # marginal (per Scenario mean)
+    fit1   = as.numeric(fitted(m4, level = 1)),   # conditional (Incident-specific)
+    r_norm = as.numeric(resid(m4, type = "normalized"))
+  )
+
+ggplot(plot_df, aes(fit1, r_norm, color = as.logical(switched))) +
+  geom_point(alpha = 0.6, size = 1.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  facet_wrap(~ Scenario) +
+  scale_color_manual(values = c("grey50","red"), na.translate = FALSE) +
+  labs(title = "Residuals vs Fitted by Scenario",
+       x = "Fitted (level = 1)", y = "Normalized residuals", color = "Switched") +
+  theme_minimal()
+```
+
