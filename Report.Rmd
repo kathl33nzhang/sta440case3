@@ -34,16 +34,15 @@ To assess temporal pressure, we examined concurrent activity. Figure \@ref(fig:f
 
 ## Data Simulation
 
-The objectives are to compare the five candidate scenarios to determine the optimal options for station placement and ambulance allocation. Because we do not observe response times under unimplemented layouts, we conducted a simulation that generates response times for each scenario for every call in the cleaned dataset, resulting in five simulated observations per original incident. The scenarios under consideration are in Table \@ref(tab:tab-2). Dispatch rules governed how the simulation responded to different scenarios. 
+We do not observe response times under unimplemented scenario layouts, so we conducted a simulation that generates response times for each scenario for every call in the cleaned dataset. The scenarios under consideration are in Table \@ref(tab:tab-2).  
 
 From our EDA, we determined that we wanted to consider load scenarios. Therefore, each incoming call first checks whether any ambulances are currently available. If at least one unit is free, the system assigns the unit with the smallest estimated travel time, resulting in 0 wait time. Once assigned, each unit stays occupied for the observed duration of the call, and then becomes available again. If all units are busy when the call arrives, we assign the unit that is scheduled to become free soonest. The wait time there is the time difference between the call time and the departure time, which is the time the assigned unit finally becomes free. In both cases, the unit's subsequent availability is updated by adding the observed service duration to its departure time, making the unit busy for the duration of the incident. Total simulated response time is computed as wait time + travel time. We excluded simulated values above 2000 seconds to remove extreme, low-plausibility outcomes. We additionally created a “switched” indicator flagging whether the assigned station under a given scenario (S1–S4) differs from the baseline assignment (S0). Simulation results are in Table \@ref(tab:tab-3).
 
-## Model Selection and Rationale
+## Model Selection, Implementation and Rationale
 
-We chose to use a linear mixed model with a fixed effect on Scenario, which allowed us to calculate and test the difference in the mean simulated response time between our five scenarios (S0 through S4), as one of the primary objectives was determining changes in response time across different scenarios. We also included a random intercept for Incident_ID, allowing every unique incident to have its own baseline average response time that differs from the overall mean, even before accounting for the Scenario.
+We chose a linear mixed model with a fixed effect on Scenario, which allowed us to calculate and test the difference in the mean simulated response time between our five scenarios (S0 through S4), as one of the primary objectives was determining changes in response time across different scenarios. We also included a random intercept for Incident_ID, allowing every unique incident to have its own baseline average response time that differs from the overall mean, even before accounting for the Scenario.
 
 We fit a preliminary model with just these two components, but it had a lot of heteroscedasticity in the residuals plot. Therefore, we added a variance function that allows the remaining unexplained variability in response time to be different for each scenario. We felt that scenario was a plausible weight because a factor of unexplained variation was likely roads and traffic being more or less accessible in certain areas. Scenario would account for this because based on the placement of different stations, different areas have different ease of access which should capture more residual variation. Therefore, if a scenario has a high residual variance, it means that even after controlling for the mean, its response times are highly unpredictable or erratic. If a scenario has a low residual variance, it indicates highly consistent service performance, which is desirable in a real-world context. Thus, our final model was:
-
 $$
 \begin{aligned}
 \text{sim\_time}_{ij} &= \beta_0 + \sum_{k=1}^{4} \beta_k\,\mathbb{I}(\text{Scenario}_j = S_k) + u_i + \epsilon_{ij} \\
@@ -54,9 +53,7 @@ $$
 
 $\text{sim\_time}_{ij}$ is the simulated response time (seconds) for the $i$-th Incident ID under the $j$-th scenario. $u_i$ is the random intercept for the $i$-th Incident ID, accounting for the unique, unobserved baseline difficulty of that specific call. $\sigma^2_u$ is the variance of the random intercepts. $\sigma^2_j$ is the residual variance specific to the $j$-th scenario, which is modeled using our variance parameter $\delta^2_j$ that scales the baseline residual variance ($\sigma^2$) for Scenario $j$.
 
-## Model Implementation and Evaluation
-
-Linear mixed models were fit in R using the `nlme` package. We used the Restricted Maximum Likelihood (REML) method for estimation, which is standard practice for linear mixed models when comparing different variance structures. Additionally, the model was fit on a reduced dataset where incidents showing no variability in simulated response time across all five scenarios were dropped to ensure our coefficients primarily capture the effects of the scenario changes, not just baseline noise.
+The linear mixed models were fit in R using the `nlme` package. We used the Restricted Maximum Likelihood (REML) method for estimation, which is used for linear mixed models when comparing different variance structures. Additionally, the final model was fit on a reduced dataset where incidents showing no variability in simulated response time across all five scenarios were dropped to ensure our coefficients primarily capture the effects of the scenario changes, not just baseline noise.
 
 ## Model Evaluation
 
