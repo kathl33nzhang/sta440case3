@@ -211,12 +211,6 @@ north_choice |>
   )
 ```
 
-```{r tab-2}
-#| echo: false
-#| message: false
-# TABLE SHOWING SCENARIOS HERE
-```
-
 
 ```{r fig-2, fig.cap = "Comparison of Near vs. Far North demand"}
 #| echo: false
@@ -723,7 +717,27 @@ ggplot(counts, aes(x = factor(max_concurrency), y = n, fill = region)) +
   theme_minimal()
 ```
 
+\newpage
 
+```{r tab-2}
+#| echo: false
+#| message: false
+
+tab <- tribble(
+  ~Scenarios, ~`S0 (Current)`, ~S1, ~S2, ~S3, ~S4,
+  "Far North",  0, 0, 1, 0, 1,
+  "Near North", 0, 1, 0, 1, 0,
+  "Central",    3, 3, 3, 2, 2,
+  "South",      1, 0, 0, 1, 1
+)
+
+tab |>
+  kable(
+    align   = "lccccc",
+    booktabs = TRUE,
+    caption = "Summary of ambulance allocation counts under the five stationing scenarios (S0–S4)."
+  )
+```
 
 ```{r message=F, include=FALSE}
 rm(list = ls())
